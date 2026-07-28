@@ -69,6 +69,7 @@ const xmlNumber = (value: number) =>
 export const export3mf = ({
   positions,
   indices,
+  color,
 }: GeneratedBall): Uint8Array => {
   const vertices: string[] = [];
   for (let offset = 0; offset < positions.length; offset += 3) {
@@ -93,7 +94,8 @@ export const export3mf = ({
   <metadata name="Title">AirLab generated ball</metadata>
   <metadata name="Application">AirLab 0.1.0</metadata>
   <resources>
-    <object id="1" type="model">
+    <basematerials id="2"><base name="Ball" displaycolor="${/^#[0-9a-f]{6}$/i.test(color) ? color : "#7fa84f"}"/></basematerials>
+    <object id="1" type="model" pid="2" pindex="0">
       <mesh>
         <vertices>${vertices.join("")}</vertices>
         <triangles>${triangles.join("")}</triangles>

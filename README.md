@@ -14,10 +14,18 @@ The same source builds native installers for macOS and Windows with Tauri.
 - Open airless lattices
 - Triangle and mathematically derived hexagon/pentagon topology
 - Dot and spike patterns for massage-ball concepts
+- Editable tennis, football, basketball, volleyball, and stitched baseball bands
+- Reference-style perforated ping-pong, tennis, football, basketball,
+  volleyball, baseball, and golf templates
+- Solid massage-ball and pet-toy templates with rounded surface features
+- Raised or engraved dot-matrix text and rasterized logo marks
 - Diameter, feature size, depth/height, density, and mesh-quality controls
-- Smooth, evenly lit Three.js preview with orbit and zoom
+- Balanced Three.js lighting with soft self/contact shadows, orbit, and zoom
 - Named projects stored locally with create, save, open, duplicate, and delete
-- Light, warm-gray, and dark themes plus custom interface, text, and accent colors
+- Projects dashboard shown at launch and a dedicated new-design template picker
+- Local prototype account, subscription, and monthly usage screens
+- Light, warm-gray, and dark themes plus custom UI and default-model colors
+- Per-project model color retained by 3MF export
 - Manifold mesh validation and physical dimensions
 - Binary STL and millimeter-based 3MF export
 
@@ -29,9 +37,11 @@ result contains the twelve pentagons required to close a spherical surface.
 1. Generate a geodesic sphere or topology graph.
 2. Build a solid, radial shell, through-hole pattern, or beam network.
 3. Resolve unions and differences with the Manifold geometry kernel.
-4. Convert the result to one indexed triangle mesh.
-5. Verify that every edge belongs to exactly two triangles.
-6. Export binary STL or a packaged 3MF model.
+4. Apply smooth closed sport ribbons, baseball stitches, and optional
+   text/logo marking as real mesh operations.
+5. Convert the result to one indexed triangle mesh.
+6. Verify that every edge belongs to exactly two triangles.
+7. Export binary STL or a packaged, color-aware 3MF model.
 
 Geometry runs in a Web Worker so orbiting and the rest of the interface remain
 responsive while a model is rebuilt.
@@ -90,8 +100,8 @@ convention. Prefer 3MF when the target slicer supports it.
 
 ## Next product milestones
 
-- Tennis, baseball, basketball, and volleyball seam-curve presets
-- User-imported SVG patterns
+- Free-form seam editor
+- Higher-resolution vector tracing for imported SVG patterns
 - Split/multi-material export
 - Minimum-thickness heat map
 - Reusable geometry presets

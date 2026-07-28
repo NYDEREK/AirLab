@@ -1,27 +1,51 @@
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import {
   AlertTriangle,
+  ArrowLeft,
+  Circle,
   CircleDot,
   Download,
   FileBox,
-  FolderOpen,
   Gauge,
-  Grid3X3,
   Hexagon,
   Loader2,
-  Palette,
-  Plus,
   Ruler,
   Save,
+  Settings,
   Sparkles,
   Triangle,
+  UserRound,
 } from "lucide-react";
-import { AppearancePanel } from "./components/AppearancePanel";
+import {
+  loadAccount,
+  loadUsage,
+  recordExport,
+  recordGeneration,
+  signInLocally,
+  signOutLocally,
+  type AccountSession,
+  type UsageState,
+} from "./account/store";
+import { AuthDialog } from "./components/AuthDialog";
 import { BallViewport } from "./components/BallViewport";
+import { BrandLogo } from "./components/BrandLogo";
 import { RangeField, SegmentedControl } from "./components/Controls";
+import {
+  createCustomBand,
+  CustomBandControls,
+} from "./components/CustomBandControls";
 import { HelpTooltip } from "./components/HelpTooltip";
-import { ProjectLibrary } from "./components/ProjectLibrary";
+import { MarkingControls } from "./components/MarkingControls";
+import { ProjectDashboard } from "./components/ProjectDashboard";
 import { SaveProjectDialog } from "./components/SaveProjectDialog";
+import { SettingsPanel } from "./components/SettingsPanel";
+import { TemplatePicker } from "./components/TemplatePicker";
 import { saveGeneratedBall, type ExportFormat } from "./geometry/exporters";
 import {
   DEFAULT_PARAMETERS,
@@ -29,6 +53,8 @@ import {
   type BallParameters,
   type BallPattern,
   type MeshQuality,
+  type SeamProfile,
+  type SeamPattern,
   type SurfaceEffect,
 } from "./geometry/types";
 import { useBallGenerator } from "./hooks/useBallGenerator";
@@ -41,12 +67,29 @@ import {
   type AppearanceSettings,
   type SavedProject,
 } from "./projects/store";
+import {
+  parametersForTemplate,
+  templateById,
+  type BallTemplateDefinition,
+} from "./projects/templates";
+
+type AppView = "projects" | "templates" | "editor";
 
 const MODE_OPTIONS: Array<{ value: BallMode; label: string }> = [
   { value: "solid", label: "Solid" },
   { value: "shell", label: "Hollow shell" },
   { value: "perforated", label: "Perforated" },
   { value: "lattice", label: "Airless lattice" },
+];
+
+const SEAM_OPTIONS: Array<{ value: SeamPattern; label: string }> = [
+  { value: "none", label: "None" },
+  { value: "custom", label: "Custom" },
+  { value: "tennis", label: "Tennis" },
+  { value: "football", label: "Football" },
+  { value: "basketball", label: "Basketball" },
+  { value: "volleyball", label: "Volleyball" },
+  { value: "baseball", label: "Baseball" },
 ];
 
 const formatNumber = (value: number, digits = 1) =>
@@ -75,10 +118,14 @@ const accentTextColor = (hex: string) => {
 };
 
 function App() {
+  const [view, setView] = useState<AppView>("projects");
   const [parameters, setParameters] = useState<BallParameters>({
     ...DEFAULT_PARAMETERS,
   });
-  const { ball, state, error } = useBallGenerator(parameters);
+  const { ball, state, error } = useBallGenerator(
+    parameters,
+    view === "editor",
+  );
   const [exporting, setExporting] = useState<ExportFormat | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [projects, setProjects] = useState<SavedProject[]>(() =>
@@ -87,12 +134,17 @@ function App() {
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
   const [projectName, setProjectName] = useState("Untitled ball");
   const [lastSavedHash, setLastSavedHash] = useState<string | null>(null);
-  const [showProjects, setShowProjects] = useState(false);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
-  const [showAppearance, setShowAppearance] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [showAuth, setShowAuth] = useState(false);
   const [appearance, setAppearance] = useState<AppearanceSettings>(() =>
     loadAppearance(),
   );
+  const [account, setAccount] = useState<AccountSession | null>(() =>
+    loadAccount(),
+  );
+  const [usage, setUsage] = useState<UsageState>(() => loadUsage());
+  const lastCountedBall = useRef<typeof ball>(null);
 
   const dirty =
     lastSavedHash === null || lastSavedHash !== parametersHash(parameters);
@@ -115,6 +167,12 @@ function App() {
     return () => window.clearTimeout(timeout);
   }, [notice]);
 
+  useEffect(() => {
+    if (!ball || ball === lastCountedBall.current) return;
+    lastCountedBall.current = ball;
+    setUsage(recordGeneration());
+  }, [ball]);
+
   const update = <Key extends keyof BallParameters>(
     key: Key,
     value: BallParameters[Key],
@@ -128,19 +186,54 @@ function App() {
       mode,
       pattern:
         mode === "lattice" &&
-        (current.pattern === "dots" || current.pattern === "spikes")
+        (current.pattern === "none" ||
+          current.pattern === "dots" ||
+          current.pattern === "spikes")
           ? "hexagons"
-          : current.pattern,
+          : mode === "perforated" && current.pattern === "none"
+            ? "dots"
+            : current.pattern,
     }));
   };
 
-  const createProject = () => {
-    setParameters({ ...DEFAULT_PARAMETERS });
+  const setPattern = (pattern: BallPattern) => {
+    setParameters((current) => {
+      const isPolygon =
+        pattern === "hexagons" || pattern === "triangles";
+      const wasPolygon =
+        current.pattern === "hexagons" ||
+        current.pattern === "triangles";
+      if (!isPolygon || wasPolygon) {
+        return { ...current, pattern };
+      }
+      return {
+        ...current,
+        pattern,
+        featureWidth: current.diameter >= 90 ? 1.3 : 1.1,
+        cellFrequency: current.diameter >= 90 ? 8 : 6,
+      };
+    });
+  };
+
+  const setSeamPattern = (seamPattern: SeamPattern) => {
+    setParameters((current) => ({
+      ...current,
+      seamPattern,
+      customBands:
+        seamPattern === "custom" && current.customBands.length === 0
+          ? [createCustomBand()]
+          : current.customBands,
+    }));
+  };
+
+  const selectTemplate = (template: BallTemplateDefinition) => {
+    const next = parametersForTemplate(template, appearance.defaultBallColor);
+    setParameters(next);
     setCurrentProjectId(null);
-    setProjectName("Untitled ball");
+    setProjectName(`Untitled ${template.name.toLowerCase()} ball`);
     setLastSavedHash(null);
-    setShowProjects(false);
-    setNotice("New ball created.");
+    setView("editor");
+    setNotice(`${template.name} template opened.`);
   };
 
   const openProject = (project: SavedProject) => {
@@ -148,7 +241,7 @@ function App() {
     setCurrentProjectId(project.id);
     setProjectName(project.name);
     setLastSavedHash(parametersHash(project.parameters));
-    setShowProjects(false);
+    setView("editor");
     setNotice(`Opened “${project.name}”.`);
   };
 
@@ -168,11 +261,8 @@ function App() {
   };
 
   const requestSave = () => {
-    if (currentProjectId) {
-      saveProject();
-    } else {
-      setShowSaveDialog(true);
-    }
+    if (currentProjectId) saveProject();
+    else setShowSaveDialog(true);
   };
 
   const duplicateProject = (project: SavedProject) => {
@@ -207,7 +297,10 @@ function App() {
     setNotice(null);
     try {
       const saved = await saveGeneratedBall(ball, format);
-      if (saved) setNotice(`${format.toUpperCase()} exported successfully.`);
+      if (saved) {
+        setUsage(recordExport());
+        setNotice(`${format.toUpperCase()} exported successfully.`);
+      }
     } catch (saveError) {
       setNotice(
         saveError instanceof Error ? saveError.message : String(saveError),
@@ -220,6 +313,13 @@ function App() {
   const patternOptions = useMemo(
     () => [
       {
+        value: "none" as BallPattern,
+        label: "None",
+        icon: <Circle size={15} />,
+        disabled:
+          parameters.mode === "lattice" || parameters.mode === "perforated",
+      },
+      {
         value: "triangles" as BallPattern,
         label: "Triangles",
         icon: <Triangle size={16} />,
@@ -231,7 +331,7 @@ function App() {
       },
       {
         value: "dots" as BallPattern,
-        label: "Dots",
+        label: parameters.mode === "perforated" ? "Circles" : "Dots",
         icon: <CircleDot size={16} />,
         disabled: parameters.mode === "lattice",
       },
@@ -246,339 +346,620 @@ function App() {
   );
 
   const stats = ball?.stats;
+  const hasPolygonPattern =
+    parameters.pattern === "hexagons" ||
+    parameters.pattern === "triangles";
+  const fixedFootballPanels =
+    parameters.seamPattern === "football" && hasPolygonPattern;
+  const polygonCellCount =
+    parameters.pattern === "triangles"
+      ? 20 * parameters.cellFrequency ** 2
+      : fixedFootballPanels
+        ? 32
+        : 10 * parameters.cellFrequency ** 2 + 2;
+  const approximateCellSize = Math.sqrt(
+    (Math.PI * parameters.diameter ** 2) /
+      Math.max(1, polygonCellCount),
+  );
+  const pointFrequency =
+    parameters.mode === "perforated"
+      ? 2 ** Math.max(1, parameters.density)
+      : parameters.density + 1;
+  const pointFeatureCount = 10 * pointFrequency ** 2 + 2;
   const featureLabel =
     parameters.mode === "lattice"
-      ? "Strut diameter"
+      ? "Strut thickness"
       : parameters.mode === "perforated"
-        ? "Rib width"
-        : "Feature width";
+        ? parameters.pattern === "dots"
+          ? "Hole diameter"
+          : "Rib thickness"
+        : parameters.pattern === "triangles" ||
+            parameters.pattern === "hexagons"
+          ? "Cell gap"
+          : "Feature width";
+  const template = templateById(parameters.template);
 
-  return (
-    <div className="app-shell" style={themeStyle}>
-      <header className="topbar">
-        <div className="brand">
-          <div className="brand-mark" aria-hidden="true" />
-          <strong>AirLab</strong>
-        </div>
+  const accountButton = (
+    <button
+      className="account-button"
+      onClick={() => (account ? setShowSettings(true) : setShowAuth(true))}
+      type="button"
+    >
+      {account ? (
+        <span>{account.name.slice(0, 1).toUpperCase()}</span>
+      ) : (
+        <UserRound size={16} />
+      )}
+      {account ? account.name : "Sign in"}
+    </button>
+  );
 
-        <nav className="project-actions" aria-label="Project actions">
-          <button onClick={() => setShowProjects(true)} type="button">
-            <FolderOpen size={16} />
+  const globalHeader =
+    view !== "editor" ? (
+      <header className="home-topbar">
+        <BrandLogo />
+        <nav>
+          <button
+            className={view === "projects" ? "is-active" : ""}
+            onClick={() => setView("projects")}
+            type="button"
+          >
             Projects
           </button>
-          <button onClick={createProject} type="button">
-            <Plus size={16} />
-            New
-          </button>
           <button
-            className="project-title"
-            onClick={() => setShowSaveDialog(true)}
-            title="Name or rename this project"
+            className={view === "templates" ? "is-active" : ""}
+            onClick={() => setView("templates")}
             type="button"
           >
-            <span>{projectName}</span>
-            {dirty ? <i>Unsaved</i> : <i>Saved</i>}
-          </button>
-          <button onClick={requestSave} type="button">
-            <Save size={16} />
-            Save
-          </button>
-          <button
-            aria-label="Customize appearance"
-            className={showAppearance ? "is-active" : ""}
-            onClick={() => setShowAppearance((visible) => !visible)}
-            title="Customize appearance"
-            type="button"
-          >
-            <Palette size={17} />
+            Design new
           </button>
         </nav>
-
-        <div className="export-actions">
+        <div>
           <button
-            className="secondary-action"
-            disabled={!ball || state !== "ready" || exporting !== null}
-            onClick={() => exportBall("3mf")}
+            aria-label="Open settings"
+            className="icon-action"
+            onClick={() => setShowSettings(true)}
+            title="Settings"
             type="button"
           >
-            {exporting === "3mf" ? (
-              <Loader2 className="spin" size={16} />
-            ) : (
-              <FileBox size={16} />
-            )}
-            3MF
+            <Settings size={17} />
           </button>
-          <button
-            className="primary-action"
-            disabled={!ball || state !== "ready" || exporting !== null}
-            onClick={() => exportBall("stl")}
-            type="button"
-          >
-            {exporting === "stl" ? (
-              <Loader2 className="spin" size={16} />
-            ) : (
-              <Download size={16} />
-            )}
-            Export STL
-          </button>
+          {accountButton}
         </div>
       </header>
+    ) : null;
 
-      <main className="workspace">
-        <aside className="control-panel">
-          <section className="panel-section">
-            <div className="section-label">
-              <span>Structure</span>
-              <HelpTooltip label="Structure">
-                <p>
-                  <b>Solid</b> creates a completely filled ball.
-                </p>
-                <p>
-                  <b>Hollow shell</b> creates a closed ball with a controlled
-                  wall thickness.
-                </p>
-                <p>
-                  <b>Perforated</b> cuts the selected pattern through a hollow
-                  shell.
-                </p>
-                <p>
-                  <b>Airless lattice</b> builds an open network of printable
-                  struts.
-                </p>
-              </HelpTooltip>
-            </div>
-            <SegmentedControl
-              columns={2}
-              onChange={setMode}
-              options={MODE_OPTIONS}
-              value={parameters.mode}
-            />
-          </section>
+  return (
+    <div className={`app-shell view-${view}`} style={themeStyle}>
+      {globalHeader}
 
-          <section className="panel-section">
-            <div className="section-label">
-              <span>Surface pattern</span>
-              <HelpTooltip label="Surface pattern">
-                <p>
-                  Triangles and hexagons distribute connected panels around the
-                  sphere.
-                </p>
-                <p>
-                  Dots create smooth round dimples or bumps. Spikes create
-                  taller massage features.
-                </p>
-                <p>
-                  Use <b>Raised</b> to add material or <b>Grooved</b> to cut
-                  into the surface.
-                </p>
-              </HelpTooltip>
-            </div>
-            <SegmentedControl
-              columns={2}
-              onChange={(pattern) => update("pattern", pattern)}
-              options={patternOptions}
-              value={parameters.pattern}
-            />
-            {(parameters.mode === "solid" || parameters.mode === "shell") && (
-              <div className="sub-control">
-                <span className="mini-label">Operation</span>
-                <SegmentedControl
-                  onChange={(effect: SurfaceEffect) =>
-                    update("effect", effect)
-                  }
-                  options={[
-                    { value: "raised", label: "Raised" },
-                    { value: "grooved", label: "Grooved" },
-                  ]}
-                  value={parameters.effect}
-                />
-              </div>
-            )}
-          </section>
-
-          <section className="panel-section parameter-stack">
-            <div className="section-label">
-              <span>Dimensions</span>
-            </div>
-            <RangeField
-              label="Outer diameter"
-              max={200}
-              min={20}
-              onChange={(value) => update("diameter", value)}
-              step={1}
-              unit="mm"
-              value={parameters.diameter}
-            />
-            {(parameters.mode === "shell" ||
-              parameters.mode === "perforated") && (
-              <RangeField
-                hint="radial"
-                label="Wall thickness"
-                max={8}
-                min={0.6}
-                onChange={(value) => update("wallThickness", value)}
-                step={0.1}
-                unit="mm"
-                value={parameters.wallThickness}
-              />
-            )}
-            <RangeField
-              label={featureLabel}
-              max={10}
-              min={0.6}
-              onChange={(value) => update("featureWidth", value)}
-              step={0.1}
-              unit="mm"
-              value={parameters.featureWidth}
-            />
-            {(parameters.mode === "solid" || parameters.mode === "shell") && (
-              <RangeField
-                label={
-                  parameters.effect === "raised"
-                    ? "Relief height"
-                    : "Groove depth"
-                }
-                max={8}
-                min={0.2}
-                onChange={(value) => update("featureHeight", value)}
-                step={0.1}
-                unit="mm"
-                value={parameters.featureHeight}
-              />
-            )}
-            <RangeField
-              hint="topology"
-              label="Pattern density"
-              max={3}
-              min={1}
-              onChange={(value) => update("density", value)}
-              step={1}
-              value={parameters.density}
-            />
-          </section>
-
-          <section className="panel-section">
-            <div className="section-label">
-              <span>Mesh quality</span>
-            </div>
-            <SegmentedControl
-              onChange={(quality: MeshQuality) => update("quality", quality)}
-              options={[
-                { value: "draft", label: "Draft" },
-                { value: "standard", label: "Standard" },
-                { value: "fine", label: "Fine" },
-              ]}
-              value={parameters.quality}
-            />
-          </section>
-        </aside>
-
-        <section className="stage">
-          <BallViewport accentColor={appearance.accentColor} ball={ball} />
-          <div className="stage-heading">
-            <span>Live preview</span>
-            <strong>
-              {MODE_OPTIONS.find((option) => option.value === parameters.mode)
-                ?.label}{" "}
-              · {parameters.diameter} mm
-            </strong>
-          </div>
-          <div className="viewport-help">
-            Drag to orbit <i /> Scroll to zoom
-          </div>
-          {state === "building" && (
-            <div className="build-overlay">
-              <div className="build-pulse">
-                <Loader2 className="spin" size={22} />
-              </div>
-              <span>Updating preview</span>
-            </div>
-          )}
-          {error && (
-            <div className="error-card">
-              <AlertTriangle size={18} />
-              <div>
-                <strong>Couldn’t build this combination</strong>
-                <span>{error}</span>
-              </div>
-            </div>
-          )}
-        </section>
-
-        <aside className="metrics-panel">
-          <section className="metric-group">
-            <div className="metric-title">
-              <Ruler size={16} />
-              Dimensions
-            </div>
-            <div className="metric-row">
-              <span>Outer diameter</span>
-              <strong>{parameters.diameter} mm</strong>
-            </div>
-            <div className="metric-row">
-              <span>Bounding size</span>
-              <strong>
-                {stats
-                  ? stats.dimensions
-                      .map((value) => formatNumber(value, 1))
-                      .join(" × ")
-                  : "—"}
-              </strong>
-            </div>
-            {(parameters.mode === "shell" ||
-              parameters.mode === "perforated") && (
-              <div className="metric-row">
-                <span>Wall thickness</span>
-                <strong>{parameters.wallThickness} mm</strong>
-              </div>
-            )}
-            <div className="metric-row">
-              <span>{featureLabel}</span>
-              <strong>{parameters.featureWidth} mm</strong>
-            </div>
-            <div className="metric-row">
-              <span>Volume</span>
-              <strong>
-                {stats ? `${formatNumber(stats.volume, 0)} mm³` : "—"}
-              </strong>
-            </div>
-            <div className="metric-row">
-              <span>Surface area</span>
-              <strong>
-                {stats ? `${formatNumber(stats.surfaceArea, 0)} mm²` : "—"}
-              </strong>
-            </div>
-            <div className="metric-row">
-              <span>STL estimate</span>
-              <strong>
-                {stats ? formatBytes(fileSizeEstimate(stats.triangles)) : "—"}
-              </strong>
-            </div>
-          </section>
-
-          <section className="quality-note">
-            <Gauge size={16} />
-            <div>
-              <strong>{parameters.quality} preview</strong>
-              <span>
-                Export uses the same closed manufacturing geometry shown here.
-              </span>
-            </div>
-          </section>
-        </aside>
-      </main>
-
-      {showProjects && (
-        <ProjectLibrary
-          currentProjectId={currentProjectId}
-          onClose={() => setShowProjects(false)}
-          onCreate={createProject}
+      {view === "projects" ? (
+        <ProjectDashboard
+          onCreate={() => setView("templates")}
           onDelete={deleteProject}
           onDuplicate={duplicateProject}
           onOpen={openProject}
           projects={projects}
         />
-      )}
+      ) : null}
+
+      {view === "templates" ? (
+        <TemplatePicker
+          onBack={() => setView("projects")}
+          onSelect={selectTemplate}
+        />
+      ) : null}
+
+      {view === "editor" ? (
+        <>
+          <header className="topbar editor-topbar">
+            <BrandLogo compact />
+            <nav className="project-actions" aria-label="Project actions">
+              <button onClick={() => setView("projects")} type="button">
+                <ArrowLeft size={16} />
+                Projects
+              </button>
+              <button
+                className="project-title"
+                onClick={() => setShowSaveDialog(true)}
+                title="Name or rename this project"
+                type="button"
+              >
+                <span>{projectName}</span>
+                {dirty ? <i>Unsaved</i> : <i>Saved</i>}
+              </button>
+              <button onClick={requestSave} type="button">
+                <Save size={16} />
+                Save
+              </button>
+              <button
+                aria-label="Open settings"
+                onClick={() => setShowSettings(true)}
+                title="Settings"
+                type="button"
+              >
+                <Settings size={17} />
+              </button>
+              {accountButton}
+            </nav>
+
+            <div className="export-actions">
+              <button
+                className="secondary-action"
+                disabled={!ball || state !== "ready" || exporting !== null}
+                onClick={() => exportBall("3mf")}
+                type="button"
+              >
+                {exporting === "3mf" ? (
+                  <Loader2 className="spin" size={16} />
+                ) : (
+                  <FileBox size={16} />
+                )}
+                3MF
+              </button>
+              <button
+                className="primary-action"
+                disabled={!ball || state !== "ready" || exporting !== null}
+                onClick={() => exportBall("stl")}
+                type="button"
+              >
+                {exporting === "stl" ? (
+                  <Loader2 className="spin" size={16} />
+                ) : (
+                  <Download size={16} />
+                )}
+                Export STL
+              </button>
+            </div>
+          </header>
+
+          <main className="workspace">
+            <aside className="control-panel">
+              <section className="panel-section model-color-section">
+                <div className="section-label">
+                  <span>Model color</span>
+                </div>
+                <label>
+                  <input
+                    aria-label="Ball color"
+                    onChange={(event) =>
+                      update("ballColor", event.target.value)
+                    }
+                    type="color"
+                    value={parameters.ballColor}
+                  />
+                  <span>
+                    <strong>Preview & 3MF color</strong>
+                    <small>{parameters.ballColor.toUpperCase()}</small>
+                  </span>
+                </label>
+                <p>STL stores geometry only; 3MF also keeps this color.</p>
+              </section>
+
+              <div className="control-group-heading">
+                <strong>Ball</strong>
+                <span>Structure, pattern & dimensions</span>
+              </div>
+
+              <section className="panel-section">
+                <div className="section-label">
+                  <span>Structure</span>
+                  <HelpTooltip label="Structure">
+                    <p>
+                      <b>Solid</b> creates a completely filled ball.
+                    </p>
+                    <p>
+                      <b>Hollow shell</b> creates a closed ball with controlled
+                      wall thickness.
+                    </p>
+                    <p>
+                      <b>Perforated</b> cuts triangles, hexagons or circles
+                      through the shell.
+                    </p>
+                    <p>
+                      <b>Airless lattice</b> builds an open printable network.
+                    </p>
+                  </HelpTooltip>
+                </div>
+                <SegmentedControl
+                  columns={2}
+                  onChange={setMode}
+                  options={MODE_OPTIONS}
+                  value={parameters.mode}
+                />
+              </section>
+
+              <section className="panel-section">
+                <div className="section-label">
+                  <span>Pattern</span>
+                  <HelpTooltip label="Surface pattern">
+                    <p>
+                      Surface patterns may be raised, grooved, or cut through a
+                      perforated shell.
+                    </p>
+                    <p>
+                      Choose <b>None</b> for a clean sport-ball surface with
+                      seams only.
+                    </p>
+                    <p>
+                      Hexagons and triangles are generated from one shared
+                      geodesic grid. Adjacent cells always use the same edge.
+                    </p>
+                    <p>
+                      A closed hexagonal sphere necessarily includes twelve
+                      pentagons. Football uses its own exact 32-panel layout.
+                    </p>
+                    <p>
+                      For a seamless grid, diameter and cell count determine
+                      the physical cell size together. The approximate size is
+                      shown beside the count control.
+                    </p>
+                  </HelpTooltip>
+                </div>
+                <SegmentedControl
+                  columns={2}
+                  onChange={setPattern}
+                  options={patternOptions}
+                  value={parameters.pattern}
+                />
+                {parameters.pattern !== "none" &&
+                  (parameters.mode === "solid" ||
+                    parameters.mode === "shell") && (
+                    <div className="sub-control">
+                      <span className="mini-label">Operation</span>
+                      <SegmentedControl
+                        onChange={(effect: SurfaceEffect) =>
+                          update("effect", effect)
+                        }
+                        options={[
+                          { value: "raised", label: "Raised" },
+                          { value: "grooved", label: "Grooved" },
+                        ]}
+                        value={parameters.effect}
+                      />
+                    </div>
+                  )}
+              </section>
+
+              <section className="panel-section parameter-stack">
+                <div className="section-label">
+                  <span>Dimensions</span>
+                </div>
+                <RangeField
+                  label="Diameter"
+                  max={240}
+                  min={20}
+                  onChange={(value) => update("diameter", value)}
+                  step={1}
+                  unit="mm"
+                  value={parameters.diameter}
+                />
+                {(parameters.mode === "shell" ||
+                  parameters.mode === "perforated") && (
+                  <RangeField
+                    hint="radial"
+                    label="Wall thickness"
+                    max={8}
+                    min={0.6}
+                    onChange={(value) => update("wallThickness", value)}
+                    step={0.1}
+                    unit="mm"
+                    value={parameters.wallThickness}
+                  />
+                )}
+                {parameters.pattern !== "none" ? (
+                  <RangeField
+                    label={featureLabel}
+                    max={10}
+                    min={0.6}
+                    onChange={(value) => update("featureWidth", value)}
+                    step={0.1}
+                    unit="mm"
+                    value={parameters.featureWidth}
+                  />
+                ) : null}
+                {hasPolygonPattern && !fixedFootballPanels ? (
+                  <RangeField
+                    displayValue={`${polygonCellCount}`}
+                    hint={`≈ ${formatNumber(approximateCellSize)} mm each`}
+                    label="Cell count"
+                    max={8}
+                    min={parameters.pattern === "hexagons" ? 2 : 1}
+                    onChange={(value) => update("cellFrequency", value)}
+                    step={1}
+                    value={parameters.cellFrequency}
+                  />
+                ) : fixedFootballPanels ? (
+                  <div className="read-only-parameter">
+                    <span>
+                      Panel count
+                      <small>classic football layout</small>
+                    </span>
+                    <strong>32</strong>
+                  </div>
+                ) : null}
+                {parameters.pattern !== "none" &&
+                  (parameters.mode === "solid" ||
+                    parameters.mode === "shell") && (
+                    <RangeField
+                      label={
+                        parameters.effect === "raised"
+                          ? "Relief height"
+                          : "Groove depth"
+                      }
+                      max={8}
+                      min={0.2}
+                      onChange={(value) => update("featureHeight", value)}
+                      step={0.1}
+                      unit="mm"
+                      value={parameters.featureHeight}
+                    />
+                  )}
+                {parameters.pattern !== "none" &&
+                (parameters.pattern === "dots" ||
+                  parameters.pattern === "spikes") ? (
+                  <RangeField
+                    displayValue={`${pointFeatureCount}`}
+                    hint="evenly distributed"
+                    label={
+                      parameters.mode === "perforated"
+                        ? "Hole count"
+                        : "Feature count"
+                    }
+                    max={3}
+                    min={1}
+                    onChange={(value) => update("density", value)}
+                    step={1}
+                    value={parameters.density}
+                  />
+                ) : null}
+              </section>
+
+              <div className="control-group-heading">
+                <strong>Bands & text</strong>
+                <span>Sport lines, labels & logos</span>
+              </div>
+
+              <section className="panel-section">
+                  <div className="section-label">
+                    <span>
+                      Sport detailing
+                    </span>
+                    <HelpTooltip label="Sport lines">
+                      <p>
+                        Add the real panel or seam layout for tennis,
+                        football, basketball, volleyball, or baseball.
+                      </p>
+                      <p>
+                        On an airless ball, <b>Inset</b> moves the structural
+                        line toward the center and <b>Raised</b> moves it
+                        outward. Both remain connected to the lattice.
+                      </p>
+                      <p>
+                        Tennis and basketball include an editable curvature
+                        control for changing the bend of their sport lines.
+                      </p>
+                      <p>
+                        <b>Custom</b> lets you add up to eight closed bands and
+                        position and bend every one independently.
+                      </p>
+                    </HelpTooltip>
+                  </div>
+                  <SegmentedControl
+                    columns={2}
+                    onChange={setSeamPattern}
+                    options={SEAM_OPTIONS}
+                    value={parameters.seamPattern}
+                  />
+                  {parameters.seamPattern !== "none" ? (
+                    <div className="seam-parameters">
+                      {parameters.seamPattern === "custom" ? (
+                        <CustomBandControls
+                          bands={parameters.customBands}
+                          onChange={(customBands) =>
+                            update("customBands", customBands)
+                          }
+                          onNotice={setNotice}
+                        />
+                      ) : null}
+                      <span className="mini-label">Band position</span>
+                      <SegmentedControl
+                        onChange={(value: SurfaceEffect) =>
+                          update("seamOperation", value)
+                        }
+                        options={[
+                          { value: "grooved", label: "Inset" },
+                          { value: "raised", label: "Raised" },
+                        ]}
+                        value={parameters.seamOperation}
+                      />
+                      <span className="mini-label">Band profile</span>
+                      <SegmentedControl
+                        onChange={(value: SeamProfile) =>
+                          update("seamProfile", value)
+                        }
+                        options={[
+                          { value: "flat", label: "Flat" },
+                          { value: "rounded", label: "Rounded" },
+                        ]}
+                        value={parameters.seamProfile}
+                      />
+                      <RangeField
+                        label="Band thickness"
+                        max={Math.max(
+                          8,
+                          Math.min(36, parameters.diameter * 0.4),
+                        )}
+                        min={0.6}
+                        onChange={(value) => update("seamWidth", value)}
+                        step={0.1}
+                        unit="mm"
+                        value={parameters.seamWidth}
+                      />
+                      {parameters.seamPattern === "tennis" ||
+                      parameters.seamPattern === "basketball" ? (
+                        <RangeField
+                          hint="shape"
+                          label="Band curvature"
+                          max={100}
+                          min={0}
+                          onChange={(value) =>
+                            update("seamCurvature", value)
+                          }
+                          step={1}
+                          unit="%"
+                          value={parameters.seamCurvature}
+                        />
+                      ) : null}
+                      <RangeField
+                        label={
+                          parameters.seamOperation === "raised"
+                            ? "Band height"
+                            : "Band depth"
+                        }
+                        max={4}
+                        min={0.2}
+                        onChange={(value) => update("seamDepth", value)}
+                        step={0.1}
+                        unit="mm"
+                        value={parameters.seamDepth}
+                      />
+                    </div>
+                  ) : null}
+                </section>
+
+              <MarkingControls
+                onNotice={setNotice}
+                onUpdate={update}
+                parameters={parameters}
+              />
+
+              <section className="panel-section">
+                <div className="section-label">
+                  <span>Mesh quality</span>
+                </div>
+                <SegmentedControl
+                  onChange={(quality: MeshQuality) =>
+                    update("quality", quality)
+                  }
+                  options={[
+                    { value: "draft", label: "Draft" },
+                    { value: "standard", label: "Standard" },
+                    { value: "fine", label: "Fine" },
+                  ]}
+                  value={parameters.quality}
+                />
+              </section>
+            </aside>
+
+            <section className="stage">
+              <BallViewport accentColor={parameters.ballColor} ball={ball} />
+              <div className="stage-heading">
+                <span>{template.name}</span>
+                <strong>
+                  {MODE_OPTIONS.find(
+                    (option) => option.value === parameters.mode,
+                  )?.label}{" "}
+                  · {parameters.diameter} mm
+                </strong>
+              </div>
+              <div className="viewport-help">
+                Drag to orbit <i /> Scroll to zoom
+              </div>
+              {state === "building" && (
+                <div className="build-overlay">
+                  <div className="build-pulse">
+                    <Loader2 className="spin" size={22} />
+                  </div>
+                  <span>Updating preview</span>
+                </div>
+              )}
+              {error && (
+                <div className="error-card">
+                  <AlertTriangle size={18} />
+                  <div>
+                    <strong>Couldn’t build this combination</strong>
+                    <span>{error}</span>
+                  </div>
+                </div>
+              )}
+            </section>
+
+            <aside className="metrics-panel">
+              <section className="metric-group">
+                <div className="metric-title">
+                  <Ruler size={16} />
+                  Dimensions
+                </div>
+                <div className="metric-row">
+                  <span>Template</span>
+                  <strong>{template.name}</strong>
+                </div>
+                <div className="metric-row">
+                  <span>Diameter</span>
+                  <strong>{parameters.diameter} mm</strong>
+                </div>
+                <div className="metric-row">
+                  <span>Bounding size</span>
+                  <strong>
+                    {stats
+                      ? stats.dimensions
+                          .map((value) => formatNumber(value, 1))
+                          .join(" × ")
+                      : "—"}
+                  </strong>
+                </div>
+                {(parameters.mode === "shell" ||
+                  parameters.mode === "perforated") && (
+                  <div className="metric-row">
+                    <span>Wall thickness</span>
+                    <strong>{parameters.wallThickness} mm</strong>
+                  </div>
+                )}
+                {parameters.seamPattern !== "none" ? (
+                  <div className="metric-row">
+                    <span>Seams</span>
+                    <strong>{parameters.seamPattern}</strong>
+                  </div>
+                ) : null}
+                <div className="metric-row">
+                  <span>Volume</span>
+                  <strong>
+                    {stats ? `${formatNumber(stats.volume, 0)} mm³` : "—"}
+                  </strong>
+                </div>
+                <div className="metric-row">
+                  <span>Surface area</span>
+                  <strong>
+                    {stats
+                      ? `${formatNumber(stats.surfaceArea, 0)} mm²`
+                      : "—"}
+                  </strong>
+                </div>
+                <div className="metric-row">
+                  <span>STL estimate</span>
+                  <strong>
+                    {stats
+                      ? formatBytes(fileSizeEstimate(stats.triangles))
+                      : "—"}
+                  </strong>
+                </div>
+              </section>
+
+              <section className="quality-note">
+                <Gauge size={16} />
+                <div>
+                  <strong>{parameters.quality} geometry</strong>
+                  <span>
+                    Sport seams and branding are included in the closed export
+                    mesh.
+                  </span>
+                </div>
+              </section>
+            </aside>
+          </main>
+        </>
+      ) : null}
 
       {showSaveDialog && (
         <SaveProjectDialog
@@ -588,11 +969,36 @@ function App() {
         />
       )}
 
-      {showAppearance && (
-        <AppearancePanel
+      {showSettings && (
+        <SettingsPanel
+          account={account}
           appearance={appearance}
-          onChange={setAppearance}
-          onClose={() => setShowAppearance(false)}
+          onAppearanceChange={setAppearance}
+          onClose={() => setShowSettings(false)}
+          onSignIn={() => {
+            setShowSettings(false);
+            setShowAuth(true);
+          }}
+          onSignOut={() => {
+            signOutLocally();
+            setAccount(null);
+            setNotice("Signed out.");
+          }}
+          projectCount={projects.length}
+          usage={usage}
+        />
+      )}
+
+      {showAuth && (
+        <AuthDialog
+          onClose={() => setShowAuth(false)}
+          onSubmit={(name, email) => {
+            const session = signInLocally(name, email);
+            setAccount(session);
+            setShowAuth(false);
+            setNotice(`Welcome, ${session.name}.`);
+            return session;
+          }}
         />
       )}
 

@@ -34,9 +34,9 @@ export const cross = (a: Vec3Tuple, b: Vec3Tuple): Vec3Tuple => [
   a[0] * b[1] - a[1] * b[0],
 ];
 
-export const createIcosphere = (subdivisions: number): SphereTopology => {
+const baseIcosahedron = (): SphereTopology => {
   const golden = (1 + Math.sqrt(5)) / 2;
-  const baseVertices: Vec3Tuple[] = [
+  const vertices: Vec3Tuple[] = [
     [-1, golden, 0],
     [1, golden, 0],
     [-1, -golden, 0],
@@ -49,10 +49,9 @@ export const createIcosphere = (subdivisions: number): SphereTopology => {
     [golden, 0, 1],
     [-golden, 0, -1],
     [-golden, 0, 1],
-  ];
-  let vertices: Vec3Tuple[] = baseVertices.map(normalize);
+  ].map((point) => normalize(point as Vec3Tuple));
 
-  let faces: Face[] = [
+  const faces: Face[] = [
     [0, 11, 5],
     [0, 5, 1],
     [0, 1, 7],
@@ -74,6 +73,11 @@ export const createIcosphere = (subdivisions: number): SphereTopology => {
     [8, 6, 7],
     [9, 8, 1],
   ];
+  return { vertices, faces };
+};
+
+export const createIcosphere = (subdivisions: number): SphereTopology => {
+  let { vertices, faces } = baseIcosahedron();
 
   for (let step = 0; step < subdivisions; step += 1) {
     const midpointCache = new Map<string, number>();
@@ -97,6 +101,75 @@ export const createIcosphere = (subdivisions: number): SphereTopology => {
       refined.push([a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]);
     }
     faces = refined;
+  }
+
+  return { vertices, faces };
+};
+
+export const createGeodesicSphere = (frequency: number): SphereTopology => {
+  const safeFrequency = Math.max(1, Math.round(frequency));
+  const base = baseIcosahedron();
+  const vertices: Vec3Tuple[] = [];
+  const faces: Face[] = [];
+  const vertexIndices = new Map<string, number>();
+
+  const vertexIndex = (point: Vec3Tuple) => {
+    const normalized = normalize(point);
+    const key = normalized.map((value) => value.toFixed(9)).join(":");
+    const existing = vertexIndices.get(key);
+    if (existing !== undefined) return existing;
+    const index = vertices.length;
+    vertices.push(normalized);
+    vertexIndices.set(key, index);
+    return index;
+  };
+
+  for (const [aIndex, bIndex, cIndex] of base.faces) {
+    const a = base.vertices[aIndex];
+    const b = base.vertices[bIndex];
+    const c = base.vertices[cIndex];
+    const local = new Map<string, number>();
+    const at = (barycentricB: number, barycentricC: number) => {
+      const key = `${barycentricB}:${barycentricC}`;
+      const existing = local.get(key);
+      if (existing !== undefined) return existing;
+      const barycentricA =
+        safeFrequency - barycentricB - barycentricC;
+      const point: Vec3Tuple = [
+        (a[0] * barycentricA +
+          b[0] * barycentricB +
+          c[0] * barycentricC) /
+          safeFrequency,
+        (a[1] * barycentricA +
+          b[1] * barycentricB +
+          c[1] * barycentricC) /
+          safeFrequency,
+        (a[2] * barycentricA +
+          b[2] * barycentricB +
+          c[2] * barycentricC) /
+          safeFrequency,
+      ];
+      const index = vertexIndex(point);
+      local.set(key, index);
+      return index;
+    };
+
+    for (let row = 0; row < safeFrequency; row += 1) {
+      for (
+        let column = 0;
+        column < safeFrequency - row;
+        column += 1
+      ) {
+        const lowerLeft = at(row, column);
+        const lowerRight = at(row + 1, column);
+        const upperLeft = at(row, column + 1);
+        faces.push([lowerLeft, lowerRight, upperLeft]);
+        if (row + column < safeFrequency - 1) {
+          const upperRight = at(row + 1, column + 1);
+          faces.push([lowerRight, upperRight, upperLeft]);
+        }
+      }
+    }
   }
 
   return { vertices, faces };
@@ -214,7 +287,7 @@ export const fibonacciPoints = (count: number): Vec3Tuple[] => {
   const points: Vec3Tuple[] = [];
   const goldenAngle = Math.PI * (3 - Math.sqrt(5));
   for (let index = 0; index < count; index += 1) {
-    const y = 1 - (index / Math.max(1, count - 1)) * 2;
+    const y = 1 - ((index + 0.5) / Math.max(1, count)) * 2;
     const circleRadius = Math.sqrt(Math.max(0, 1 - y * y));
     const theta = goldenAngle * index;
     points.push([

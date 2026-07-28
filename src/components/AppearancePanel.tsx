@@ -8,7 +8,8 @@ import {
 interface AppearancePanelProps {
   appearance: AppearanceSettings;
   onChange: (appearance: AppearanceSettings) => void;
-  onClose: () => void;
+  onClose?: () => void;
+  embedded?: boolean;
 }
 
 const ColorField = ({
@@ -38,17 +39,24 @@ export function AppearancePanel({
   appearance,
   onChange,
   onClose,
+  embedded = false,
 }: AppearancePanelProps) {
   return (
-    <aside className="appearance-panel">
+    <div className={`appearance-panel ${embedded ? "is-embedded" : ""}`}>
       <div className="drawer-heading">
         <div>
           <span>Appearance</span>
           <strong>Customize AirLab</strong>
         </div>
-        <button aria-label="Close appearance panel" onClick={onClose} type="button">
-          <X size={18} />
-        </button>
+        {!embedded ? (
+          <button
+            aria-label="Close appearance panel"
+            onClick={onClose}
+            type="button"
+          >
+            <X size={18} />
+          </button>
+        ) : null}
       </div>
 
       <section>
@@ -103,11 +111,18 @@ export function AppearancePanel({
             value={appearance.mutedTextColor}
           />
           <ColorField
-            label="Accent & model"
+            label="Interface accent"
             onChange={(accentColor) =>
               onChange({ ...appearance, accentColor })
             }
             value={appearance.accentColor}
+          />
+          <ColorField
+            label="Default ball"
+            onChange={(defaultBallColor) =>
+              onChange({ ...appearance, defaultBallColor })
+            }
+            value={appearance.defaultBallColor}
           />
         </div>
       </section>
@@ -120,6 +135,6 @@ export function AppearancePanel({
         <RotateCcw size={15} />
         Restore default
       </button>
-    </aside>
+    </div>
   );
 }

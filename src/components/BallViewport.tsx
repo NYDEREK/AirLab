@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import {
+  ACESFilmicToneMapping,
   AmbientLight,
   BufferAttribute,
   BufferGeometry,
@@ -11,8 +12,11 @@ import {
   HemisphereLight,
   Mesh,
   MeshStandardMaterial,
+  PCFShadowMap,
   PerspectiveCamera,
+  PlaneGeometry,
   Scene,
+  ShadowMaterial,
   SRGBColorSpace,
   Vector3,
   WebGLRenderer,
@@ -30,6 +34,9 @@ export function BallViewport({ ball, accentColor }: BallViewportProps) {
   const groupRef = useRef<Group | null>(null);
   const rendererRef = useRef<WebGLRenderer | null>(null);
   const cameraRef = useRef<PerspectiveCamera | null>(null);
+  const controlsRef = useRef<OrbitControls | null>(null);
+  const gridRef = useRef<GridHelper | null>(null);
+  const groundRef = useRef<Mesh | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -47,6 +54,10 @@ export function BallViewport({ ball, accentColor }: BallViewportProps) {
     });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.outputColorSpace = SRGBColorSpace;
+    renderer.toneMapping = ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.05;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = PCFShadowMap;
     renderer.setClearColor(new Color("#ffffff"), 0);
     container.appendChild(renderer.domElement);
     rendererRef.current = renderer;
@@ -57,19 +68,30 @@ export function BallViewport({ ball, accentColor }: BallViewportProps) {
     controls.enablePan = false;
     controls.minDistance = 28;
     controls.maxDistance = 600;
+    controlsRef.current = controls;
 
-    scene.add(new AmbientLight("#ffffff", 1.05));
-    scene.add(new HemisphereLight("#ffffff", "#d9ddd5", 0.8));
-    const key = new DirectionalLight("#ffffff", 0.55);
+    scene.add(new AmbientLight("#ffffff", 0.68));
+    scene.add(new HemisphereLight("#ffffff", "#c9d0c6", 0.9));
+    const key = new DirectionalLight("#ffffff", 1.55);
     key.position.set(65, 90, 75);
+    key.castShadow = true;
+    key.shadow.mapSize.set(2048, 2048);
+    key.shadow.radius = 5;
+    key.shadow.bias = -0.0003;
+    key.shadow.camera.left = -140;
+    key.shadow.camera.right = 140;
+    key.shadow.camera.top = 140;
+    key.shadow.camera.bottom = -140;
+    key.shadow.camera.near = 1;
+    key.shadow.camera.far = 350;
     scene.add(key);
-    const rim = new DirectionalLight("#ffffff", 0.48);
+    const rim = new DirectionalLight("#ffffff", 0.62);
     rim.position.set(-80, 20, -55);
     scene.add(rim);
-    const fill = new DirectionalLight("#ffffff", 0.44);
+    const fill = new DirectionalLight("#ffffff", 0.52);
     fill.position.set(15, -70, 80);
     scene.add(fill);
-    const back = new DirectionalLight("#eef1f5", 0.4);
+    const back = new DirectionalLight("#eef1f5", 0.48);
     back.position.set(45, 20, -90);
     scene.add(back);
 
@@ -83,16 +105,25 @@ export function BallViewport({ ball, accentColor }: BallViewportProps) {
       material.transparent = true;
     });
     scene.add(grid);
+    gridRef.current = grid;
+
+    const ground = new Mesh(
+      new PlaneGeometry(360, 360),
+      new ShadowMaterial({ color: "#535950", opacity: 0.17 }),
+    );
+    ground.rotation.x = -Math.PI / 2;
+    ground.position.y = -42.2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+    groundRef.current = ground;
 
     const group = new Group();
-    group.rotation.x = -0.08;
-    group.rotation.y = 0.2;
     scene.add(group);
     groupRef.current = group;
 
     const resize = () => {
       const { clientWidth, clientHeight } = container;
-      renderer.setSize(clientWidth, clientHeight, false);
+      renderer.setSize(clientWidth, clientHeight);
       camera.aspect = clientWidth / Math.max(1, clientHeight);
       camera.updateProjectionMatrix();
     };
@@ -117,6 +148,9 @@ export function BallViewport({ ball, accentColor }: BallViewportProps) {
       groupRef.current = null;
       rendererRef.current = null;
       cameraRef.current = null;
+      controlsRef.current = null;
+      gridRef.current = null;
+      groundRef.current = null;
     };
   }, []);
 
@@ -146,6 +180,7 @@ export function BallViewport({ ball, accentColor }: BallViewportProps) {
       new BufferAttribute(ball.previewNormals, 3),
     );
     geometry.setIndex(new BufferAttribute(ball.previewIndices, 1));
+    geometry.computeBoundingBox();
     geometry.computeBoundingSphere();
 
     const material = new MeshStandardMaterial({
@@ -155,15 +190,26 @@ export function BallViewport({ ball, accentColor }: BallViewportProps) {
       side: DoubleSide,
     });
     const mesh = new Mesh(geometry, material);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
     group.add(mesh);
 
     const radius = geometry.boundingSphere?.radius ?? 36;
+    const center =
+      geometry.boundingBox?.getCenter(new Vector3()) ?? new Vector3();
+    const floorY = (geometry.boundingBox?.min.y ?? -radius) - radius * 0.08;
+    if (gridRef.current) gridRef.current.position.y = floorY;
+    if (groundRef.current) groundRef.current.position.y = floorY - radius * 0.002;
     const camera = cameraRef.current;
     if (camera) {
       const distance = Math.max(48, radius * 4.1);
       const direction = new Vector3(0.66, 0.48, 0.76).normalize();
-      camera.position.copy(direction.multiplyScalar(distance));
-      camera.lookAt(0, 0, 0);
+      camera.position.copy(center).add(direction.multiplyScalar(distance));
+      camera.lookAt(center);
+      if (controlsRef.current) {
+        controlsRef.current.target.copy(center);
+        controlsRef.current.update();
+      }
     }
   }, [accentColor, ball]);
 

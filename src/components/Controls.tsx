@@ -49,6 +49,7 @@ interface RangeFieldProps {
   step: number;
   unit?: string;
   hint?: string;
+  displayValue?: string;
   onChange: (value: number) => void;
 }
 
@@ -60,6 +61,7 @@ export function RangeField({
   step,
   unit,
   hint,
+  displayValue,
   onChange,
 }: RangeFieldProps) {
   const progress = ((value - min) / (max - min)) * 100;
@@ -71,14 +73,18 @@ export function RangeField({
           {hint ? <small>{hint}</small> : null}
         </span>
         <span className="number-entry">
-          <input
-            max={max}
-            min={min}
-            onChange={(event) => onChange(Number(event.target.value))}
-            step={step}
-            type="number"
-            value={value}
-          />
+          {displayValue ? (
+            <strong>{displayValue}</strong>
+          ) : (
+            <input
+              max={max}
+              min={min}
+              onChange={(event) => onChange(Number(event.target.value))}
+              step={step}
+              type="number"
+              value={value}
+            />
+          )}
           {unit ? <span>{unit}</span> : null}
         </span>
       </span>

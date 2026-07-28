@@ -19,6 +19,7 @@ const tetrahedron: GeneratedBall = {
   previewPositions: new Float32Array(),
   previewIndices: new Uint32Array(),
   previewNormals: new Float32Array(),
+  color: "#7fa84f",
   stats: {
     vertices: 4,
     triangles: 4,
@@ -27,6 +28,8 @@ const tetrahedron: GeneratedBall = {
     genus: 0,
     watertight: true,
     nonManifoldEdges: 0,
+    components: 1,
+    componentVolumes: [8 / 3],
     buildTimeMs: 0,
     dimensions: [2, 2, 2],
     warnings: [],
@@ -51,5 +54,6 @@ describe("manufacturing exports", () => {
     expect(model).toContain('unit="millimeter"');
     expect(model.match(/<vertex /g)).toHaveLength(4);
     expect(model.match(/<triangle /g)).toHaveLength(4);
+    expect(model).toContain('displaycolor="#7fa84f"');
   });
 });

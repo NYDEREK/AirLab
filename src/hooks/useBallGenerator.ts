@@ -7,7 +7,10 @@ import type {
 
 export type GeneratorState = "idle" | "building" | "ready" | "error";
 
-export const useBallGenerator = (parameters: BallParameters) => {
+export const useBallGenerator = (
+  parameters: BallParameters,
+  enabled = true,
+) => {
   const workerRef = useRef<Worker | null>(null);
   const requestId = useRef(0);
   const activeRequest = useRef(0);
@@ -46,14 +49,22 @@ export const useBallGenerator = (parameters: BallParameters) => {
   }, []);
 
   useEffect(() => {
+    if (!enabled) {
+      workerRef.current?.terminate();
+      workerRef.current = null;
+      inFlight.current = false;
+      setState("idle");
+      return;
+    }
     attachWorker();
     return () => {
       workerRef.current?.terminate();
       workerRef.current = null;
     };
-  }, [attachWorker]);
+  }, [attachWorker, enabled]);
 
   useEffect(() => {
+    if (!enabled) return;
     if (inFlight.current) {
       inFlight.current = false;
       attachWorker();
@@ -67,7 +78,7 @@ export const useBallGenerator = (parameters: BallParameters) => {
       workerRef.current?.postMessage({ id, parameters });
     }, 320);
     return () => window.clearTimeout(timeout);
-  }, [attachWorker, parameters]);
+  }, [attachWorker, enabled, parameters]);
 
   return { ball, state, error };
 };

@@ -1,4 +1,7 @@
-import type { BallParameters } from "../geometry/types";
+import {
+  normalizeParameters,
+  type BallParameters,
+} from "../geometry/types";
 
 const PROJECTS_KEY = "airlab.projects.v1";
 const APPEARANCE_KEY = "airlab.appearance.v1";
@@ -16,6 +19,7 @@ export interface AppearanceSettings {
   textColor: string;
   mutedTextColor: string;
   accentColor: string;
+  defaultBallColor: string;
 }
 
 export const DEFAULT_APPEARANCE: AppearanceSettings = {
@@ -23,6 +27,7 @@ export const DEFAULT_APPEARANCE: AppearanceSettings = {
   textColor: "#1c211b",
   mutedTextColor: "#72786f",
   accentColor: "#789a4a",
+  defaultBallColor: "#7fa84f",
 };
 
 export const APPEARANCE_PRESETS: Array<{
@@ -40,6 +45,7 @@ export const APPEARANCE_PRESETS: Array<{
       textColor: "#262520",
       mutedTextColor: "#77736b",
       accentColor: "#bd6748",
+      defaultBallColor: "#d88952",
     },
   },
   {
@@ -49,6 +55,7 @@ export const APPEARANCE_PRESETS: Array<{
       textColor: "#f1f2ed",
       mutedTextColor: "#a4aaa0",
       accentColor: "#a3c96d",
+      defaultBallColor: "#96bf5e",
     },
   },
 ];
@@ -56,6 +63,72 @@ export const APPEARANCE_PRESETS: Array<{
 const createId = () =>
   globalThis.crypto?.randomUUID?.() ??
   `project-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+const migrateParameters = (
+  input: Partial<BallParameters>,
+): BallParameters => {
+  const parameters = normalizeParameters(input);
+  const sports = {
+    "ping-pong": {
+      pattern: "dots" as const,
+      wallThickness: 1.25,
+      featureWidth: 2.8,
+      density: 2,
+    },
+    tennis: {
+      pattern: "dots" as const,
+      wallThickness: 1.6,
+      featureWidth: 4.6,
+      seamWidth: 5.2,
+      seamDepth: 0.3,
+      density: 2,
+    },
+    football: {
+      pattern: "hexagons" as const,
+      wallThickness: 1.8,
+      featureWidth: 1.35,
+      cellSize: 6.5,
+      cellFrequency: 2,
+      seamWidth: 3.4,
+      seamDepth: 0.3,
+      density: 3,
+    },
+    basketball: {
+      pattern: "hexagons" as const,
+      wallThickness: 1.8,
+      featureWidth: 1.3,
+      cellSize: 6.5,
+      cellFrequency: 8,
+      seamWidth: 3,
+      seamDepth: 0.3,
+      density: 3,
+    },
+    volleyball: {
+      pattern: "hexagons" as const,
+      wallThickness: 1.8,
+      featureWidth: 1.35,
+      cellSize: 6.5,
+      cellFrequency: 8,
+      seamWidth: 4.2,
+      seamDepth: 0.3,
+      density: 3,
+    },
+    golf: {
+      pattern: "dots" as const,
+      wallThickness: 1.4,
+      featureWidth: 2.1,
+      density: 3,
+    },
+  };
+  const sport = sports[parameters.template as keyof typeof sports];
+  if (!sport || parameters.mode !== "lattice") return parameters;
+  return {
+    ...parameters,
+    ...sport,
+    mode: "perforated",
+    seamOperation: "raised",
+  };
+};
 
 export const loadProjects = (): SavedProject[] => {
   try {
@@ -68,6 +141,10 @@ export const loadProjects = (): SavedProject[] => {
           typeof project?.name === "string" &&
           typeof project?.parameters === "object",
       )
+      .map((project) => ({
+        ...project,
+        parameters: migrateParameters(project.parameters),
+      }))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   } catch {
     return [];
@@ -132,6 +209,10 @@ export const loadAppearance = (): AppearanceSettings => {
         typeof parsed.accentColor === "string"
           ? parsed.accentColor
           : DEFAULT_APPEARANCE.accentColor,
+      defaultBallColor:
+        typeof parsed.defaultBallColor === "string"
+          ? parsed.defaultBallColor
+          : DEFAULT_APPEARANCE.defaultBallColor,
     };
   } catch {
     return DEFAULT_APPEARANCE;
