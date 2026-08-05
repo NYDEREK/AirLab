@@ -50,7 +50,7 @@ export function ProjectLibrary({
           <div>
             <button className="new-project-button" onClick={onCreate} type="button">
               <Plus size={16} />
-              New ball
+              New design
             </button>
             <button aria-label="Close projects" onClick={onClose} type="button">
               <X size={19} />
@@ -64,10 +64,10 @@ export function ProjectLibrary({
               <FolderOpen size={24} />
             </span>
             <strong>No saved projects yet</strong>
-            <p>Create a ball, adjust its geometry, then save it here.</p>
+            <p>Create a model, adjust its geometry, then save it here.</p>
             <button onClick={onCreate} type="button">
               <Plus size={15} />
-              Create first ball
+              Create first design
             </button>
           </div>
         ) : (
@@ -84,9 +84,15 @@ export function ProjectLibrary({
                   onClick={() => onOpen(project)}
                   type="button"
                 >
-                  <span className={`project-orb pattern-${project.parameters.pattern}`}>
-                    <i />
-                  </span>
+                  {project.thumbnail ? (
+                    <img alt="" src={project.thumbnail} />
+                  ) : (
+                    <span
+                      className={`project-orb pattern-${project.parameters.pattern}`}
+                    >
+                      <i />
+                    </span>
+                  )}
                 </button>
                 <div className="project-card-body">
                   <div>

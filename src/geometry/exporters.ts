@@ -4,6 +4,17 @@ import type { GeneratedBall } from "./types";
 
 export type ExportFormat = "stl" | "3mf";
 
+const exportPositions = (model: GeneratedBall) => {
+  if (model.exportUpAxis !== "y") return model.positions;
+  const rotated = new Float32Array(model.positions.length);
+  for (let offset = 0; offset < model.positions.length; offset += 3) {
+    rotated[offset] = model.positions[offset];
+    rotated[offset + 1] = -model.positions[offset + 2];
+    rotated[offset + 2] = model.positions[offset + 1];
+  }
+  return rotated;
+};
+
 const triangleNormal = (
   positions: Float32Array,
   a: number,
@@ -26,10 +37,9 @@ const triangleNormal = (
   return [x / magnitude, y / magnitude, z / magnitude] as const;
 };
 
-export const exportBinaryStl = ({
-  positions,
-  indices,
-}: GeneratedBall): Uint8Array => {
+export const exportBinaryStl = (model: GeneratedBall): Uint8Array => {
+  const positions = exportPositions(model);
+  const { indices } = model;
   const triangleCount = indices.length / 3;
   const buffer = new ArrayBuffer(84 + triangleCount * 50);
   const view = new DataView(buffer);
@@ -66,11 +76,16 @@ export const exportBinaryStl = ({
 const xmlNumber = (value: number) =>
   Number.isFinite(value) ? value.toFixed(6).replace(/\.?0+$/, "") : "0";
 
-export const export3mf = ({
-  positions,
-  indices,
-  color,
-}: GeneratedBall): Uint8Array => {
+export const export3mf = (generated: GeneratedBall): Uint8Array => {
+  const positions = exportPositions(generated);
+  const singleColor = generated.colorMode === "single";
+  const {
+    indices,
+    triangleMaterials,
+    color,
+    detailColor,
+    markingColor,
+  } = generated;
   const vertices: string[] = [];
   for (let offset = 0; offset < positions.length; offset += 3) {
     vertices.push(
@@ -81,21 +96,45 @@ export const export3mf = ({
   }
 
   const triangles: string[] = [];
-  for (let offset = 0; offset < indices.length; offset += 3) {
+  for (
+    let offset = 0, triangleIndex = 0;
+    offset < indices.length;
+    offset += 3, triangleIndex += 1
+  ) {
+    const material = singleColor
+      ? 0
+      : Math.max(0, Math.min(2, triangleMaterials?.[triangleIndex] ?? 0));
     triangles.push(
       `<triangle v1="${indices[offset]}" v2="${indices[offset + 1]}" v3="${
         indices[offset + 2]
-      }"/>`,
+      }" pid="2" p1="${material}" p2="${material}" p3="${material}"/>`,
     );
   }
 
+  const validColor = (value: string | undefined, fallback: string) =>
+    value && /^#[0-9a-f]{6}$/i.test(value) ? value : fallback;
+  const body = validColor(color, "#7fa84f");
+  const detail = validColor(detailColor, "#f2f1ea");
+  const marking = validColor(markingColor, "#20231f");
+  const isStand = generated.exportUpAxis === "y";
+  const title = isStand ? "AirLab generated ball stand" : "AirLab generated ball";
+  const bodyName = isStand ? "Stand" : "Ball";
+  const detailName = isStand ? "Stand detail" : "Bands and frame";
+  const baseMaterials = singleColor
+    ? `<base name="${bodyName}" displaycolor="${body}"/>`
+    : `<base name="${bodyName}" displaycolor="${body}"/>
+      <base name="${detailName}" displaycolor="${detail}"/>
+      <base name="Text and logo" displaycolor="${marking}"/>`;
+
   const model = `<?xml version="1.0" encoding="UTF-8"?>
 <model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
-  <metadata name="Title">AirLab generated ball</metadata>
+  <metadata name="Title">${title}</metadata>
   <metadata name="Application">AirLab 0.1.0</metadata>
   <resources>
-    <basematerials id="2"><base name="Ball" displaycolor="${/^#[0-9a-f]{6}$/i.test(color) ? color : "#7fa84f"}"/></basematerials>
-    <object id="1" type="model" pid="2" pindex="0">
+    <basematerials id="2">
+      ${baseMaterials}
+    </basematerials>
+    <object id="1" type="model">
       <mesh>
         <vertices>${vertices.join("")}</vertices>
         <triangles>${triangles.join("")}</triangles>
@@ -143,9 +182,10 @@ const downloadInBrowser = (
 export const saveGeneratedBall = async (
   ball: GeneratedBall,
   format: ExportFormat,
+  designName: "ball" | "stand" = "ball",
 ) => {
   const bytes = format === "stl" ? exportBinaryStl(ball) : export3mf(ball);
-  const fileName = `airlab-ball.${format}`;
+  const fileName = `airlab-${designName}.${format}`;
   const mimeType =
     format === "stl"
       ? "model/stl"

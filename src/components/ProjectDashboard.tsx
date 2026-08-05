@@ -30,7 +30,7 @@ export function ProjectDashboard({
         <div>
           <span>Your workspace</span>
           <h1>Projects</h1>
-          <p>Continue a saved design or start a new printable ball.</p>
+          <p>Continue a saved design or start a new printable model.</p>
         </div>
         <button className="design-new-button" onClick={onCreate} type="button">
           <Plus size={18} />
@@ -43,8 +43,8 @@ export function ProjectDashboard({
           <span>
             <Plus size={24} />
           </span>
-          <strong>Design new ball</strong>
-          <small>Choose a sport template or a blank canvas</small>
+          <strong>Design new</strong>
+          <small>Choose a ball template, blank canvas, or fitted stand</small>
         </button>
 
         {projects.map((project) => {
@@ -61,11 +61,15 @@ export function ProjectDashboard({
                 }
                 type="button"
               >
-                <span
-                  className={`project-orb pattern-${project.parameters.pattern} seam-${project.parameters.seamPattern}`}
-                >
-                  <i />
-                </span>
+                {project.thumbnail ? (
+                  <img alt="" src={project.thumbnail} />
+                ) : (
+                  <span
+                    className={`project-orb design-${project.parameters.designKind} pattern-${project.parameters.pattern} seam-${project.parameters.seamPattern}`}
+                  >
+                    <i />
+                  </span>
+                )}
               </button>
               <div className="dashboard-card-body">
                 <div>

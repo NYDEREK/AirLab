@@ -1,37 +1,53 @@
 import {
   BarChart3,
+  Copy,
   CreditCard,
+  KeyRound,
   LogOut,
   Palette,
+  ShieldCheck,
   UserRound,
   X,
 } from "lucide-react";
 import { useState } from "react";
-import type { AccountSession, UsageState } from "../account/store";
+import { PLAN_DEFINITIONS, planById } from "../account/plans";
+import {
+  PLAN_ACCESS_CODES,
+  type AccountSession,
+  type UsageState,
+} from "../account/store";
 import type { AppearanceSettings } from "../projects/store";
 import { AppearancePanel } from "./AppearancePanel";
+import { PlanCards } from "./PlanCards";
 
-type SettingsTab = "appearance" | "account" | "subscription" | "usage";
+export type SettingsTab =
+  | "appearance"
+  | "account"
+  | "subscription"
+  | "usage"
+  | "admin";
 
 interface SettingsPanelProps {
   account: AccountSession | null;
   appearance: AppearanceSettings;
+  initialTab?: SettingsTab;
   projectCount: number;
   usage: UsageState;
+  onActivate: (code: string) => void;
   onAppearanceChange: (appearance: AppearanceSettings) => void;
   onClose: () => void;
   onSignIn: () => void;
   onSignOut: () => void;
 }
 
-const tabs: Array<{
+const baseTabs: Array<{
   id: SettingsTab;
   label: string;
   icon: typeof Palette;
 }> = [
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "account", label: "Account", icon: UserRound },
-  { id: "subscription", label: "Subscription", icon: CreditCard },
+  { id: "subscription", label: "Available plans", icon: CreditCard },
   { id: "usage", label: "Usage", icon: BarChart3 },
 ];
 
@@ -42,32 +58,56 @@ const UsageBar = ({
 }: {
   label: string;
   value: number;
-  limit: number;
-}) => (
-  <div className="usage-row">
-    <div>
-      <span>{label}</span>
-      <strong>
-        {value} / {limit}
-      </strong>
+  limit: number | null;
+}) => {
+  const percentage =
+    limit === null ? 0 : Math.min(100, (value / Math.max(1, limit)) * 100);
+  return (
+    <div className="usage-row">
+      <div>
+        <span>{label}</span>
+        <strong>
+          {limit === null ? `${value} · Unlimited` : `${value} / ${limit}`}
+        </strong>
+      </div>
+      <i className={limit === null ? "is-unlimited" : undefined}>
+        <b style={{ width: limit === null ? "100%" : `${percentage}%` }} />
+      </i>
     </div>
-    <i>
-      <b style={{ width: `${Math.min(100, (value / limit) * 100)}%` }} />
-    </i>
-  </div>
-);
+  );
+};
+
+const formatDate = (value: string | null) =>
+  value
+    ? new Intl.DateTimeFormat(undefined, {
+        day: "numeric",
+        month: "short",
+        year: "numeric",
+      }).format(new Date(value))
+    : "Lifetime";
 
 export function SettingsPanel({
   account,
   appearance,
+  initialTab = "appearance",
   projectCount,
   usage,
+  onActivate,
   onAppearanceChange,
   onClose,
   onSignIn,
   onSignOut,
 }: SettingsPanelProps) {
-  const [tab, setTab] = useState<SettingsTab>("appearance");
+  const [tab, setTab] = useState<SettingsTab>(initialTab);
+  const [activationCode, setActivationCode] = useState("");
+  const [copiedCode, setCopiedCode] = useState<string | null>(null);
+  const plan = account ? planById(account.plan) : null;
+  const tabs = account?.isAdmin
+    ? [
+        ...baseTabs,
+        { id: "admin" as const, label: "Admin", icon: ShieldCheck },
+      ]
+    : baseTabs;
 
   return (
     <div className="settings-backdrop" role="presentation">
@@ -123,7 +163,12 @@ export function SettingsPanel({
                       <strong>{account.name}</strong>
                       <small>{account.email}</small>
                     </div>
+                    {account.isAdmin ? <b>Administrator</b> : null}
                   </div>
+                  <p className="account-privacy-note">
+                    This profile and its projects are stored locally on this
+                    device.
+                  </p>
                   <button className="settings-secondary" onClick={onSignOut}>
                     <LogOut size={15} />
                     Sign out
@@ -131,10 +176,7 @@ export function SettingsPanel({
                 </>
               ) : (
                 <>
-                  <p>
-                    Sign in to prepare your workspace for future cloud project
-                    sync.
-                  </p>
+                  <p>Sign in to open your local AirLab workspace.</p>
                   <button className="settings-primary" onClick={onSignIn}>
                     Sign in to AirLab
                   </button>
@@ -144,19 +186,63 @@ export function SettingsPanel({
           ) : null}
 
           {tab === "subscription" ? (
-            <section className="settings-content">
-              <span className="settings-eyebrow">Current subscription</span>
-              <div className="plan-card">
-                <div>
-                  <span>Free</span>
-                  <strong>Starter workspace</strong>
-                  <p>Local projects, STL and 3MF export, all ball templates.</p>
+            <section className="settings-content settings-plans">
+              <span className="settings-eyebrow">Available plans</span>
+              <h3>AirLab access</h3>
+              {plan ? (
+                <div
+                  className="plan-card"
+                  style={{ "--plan-color": plan.color } as React.CSSProperties}
+                >
+                  <div>
+                    <span>{plan.name}</span>
+                    <strong>{plan.durationLabel} access</strong>
+                    <p>
+                      {plan.licenseLabel} ·{" "}
+                      {account?.expiresAt
+                        ? `valid until ${formatDate(account.expiresAt)}`
+                        : "no expiration"}
+                    </p>
+                  </div>
+                  <b>Current plan</b>
                 </div>
-                <b>Current plan</b>
+              ) : null}
+
+              {!account?.isAdmin ? (
+                <form
+                  className="settings-activation"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    onActivate(activationCode);
+                    setActivationCode("");
+                  }}
+                >
+                  <label>
+                    Activation code
+                    <span>
+                      <KeyRound size={15} />
+                      <input
+                        onChange={(event) =>
+                          setActivationCode(event.target.value)
+                        }
+                        placeholder="AIRLAB-..."
+                        required
+                        value={activationCode}
+                      />
+                      <button type="submit">Activate</button>
+                    </span>
+                  </label>
+                </form>
+              ) : null}
+
+              <PlanCards compact currentPlan={account?.plan} />
+              <div className="campaign-placeholder is-compact">
+                <strong>MakerWorld campaign</strong>
+                <span>The campaign link will be added when it goes live.</span>
+                <button disabled type="button">
+                  Coming soon
+                </button>
               </div>
-              <button className="settings-primary" disabled type="button">
-                Pro plans coming later
-              </button>
             </section>
           ) : null}
 
@@ -165,20 +251,65 @@ export function SettingsPanel({
               <span className="settings-eyebrow">Monthly usage</span>
               <h3>{usage.month}</h3>
               <div className="usage-list">
-                <UsageBar label="Exports" limit={25} value={usage.exports} />
                 <UsageBar
-                  label="Generated previews"
-                  limit={500}
-                  value={usage.generations}
+                  label="Exports"
+                  limit={account?.isAdmin ? null : (plan?.exportLimit ?? 0)}
+                  value={usage.exports}
                 />
                 <UsageBar
                   label="Saved projects"
-                  limit={10}
+                  limit={account?.isAdmin ? null : (plan?.projectLimit ?? 0)}
                   value={projectCount}
                 />
               </div>
               <p className="usage-note">
-                Usage is counted locally in this prototype and resets monthly.
+                Export usage resets each calendar month. Projects stay on this
+                device until you delete them.
+              </p>
+            </section>
+          ) : null}
+
+          {tab === "admin" && account?.isAdmin ? (
+            <section className="settings-content admin-settings">
+              <span className="settings-eyebrow">Administrator</span>
+              <h3>Plan access codes</h3>
+              <p>
+                Share the matching code with a backer after confirming their
+                reward tier.
+              </p>
+              <div className="admin-code-list">
+                {PLAN_DEFINITIONS.map((definition) => {
+                  const code = PLAN_ACCESS_CODES[definition.id];
+                  return (
+                    <article
+                      key={definition.id}
+                      style={
+                        {
+                          "--plan-color": definition.color,
+                        } as React.CSSProperties
+                      }
+                    >
+                      <div>
+                        <span>{definition.name}</span>
+                        <strong>{code}</strong>
+                      </div>
+                      <button
+                        onClick={() => {
+                          void navigator.clipboard.writeText(code);
+                          setCopiedCode(code);
+                        }}
+                        type="button"
+                      >
+                        <Copy size={14} />
+                        {copiedCode === code ? "Copied" : "Copy"}
+                      </button>
+                    </article>
+                  );
+                })}
+              </div>
+              <p className="usage-note">
+                Offline codes are intended for this campaign build. A future
+                online license service can issue individual revocable codes.
               </p>
             </section>
           ) : null}

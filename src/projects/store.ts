@@ -3,13 +3,16 @@ import {
   type BallParameters,
 } from "../geometry/types";
 
-const PROJECTS_KEY = "airlab.projects.v1";
+const LEGACY_PROJECTS_KEY = "airlab.projects.v1";
+const LEGACY_MIGRATION_KEY = "airlab.projects.v1.migrated";
+const PROJECTS_KEY_PREFIX = "airlab.projects.v2";
 const APPEARANCE_KEY = "airlab.appearance.v1";
 
 export interface SavedProject {
   id: string;
   name: string;
   parameters: BallParameters;
+  thumbnail?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -22,6 +25,11 @@ export interface AppearanceSettings {
   defaultBallColor: string;
 }
 
+export type AppearanceThemeColors = Pick<
+  AppearanceSettings,
+  "interfaceColor" | "textColor" | "mutedTextColor"
+>;
+
 export const DEFAULT_APPEARANCE: AppearanceSettings = {
   interfaceColor: "#f4f5f2",
   textColor: "#1c211b",
@@ -32,11 +40,15 @@ export const DEFAULT_APPEARANCE: AppearanceSettings = {
 
 export const APPEARANCE_PRESETS: Array<{
   name: string;
-  values: AppearanceSettings;
+  values: AppearanceThemeColors;
 }> = [
   {
     name: "Light",
-    values: DEFAULT_APPEARANCE,
+    values: {
+      interfaceColor: DEFAULT_APPEARANCE.interfaceColor,
+      textColor: DEFAULT_APPEARANCE.textColor,
+      mutedTextColor: DEFAULT_APPEARANCE.mutedTextColor,
+    },
   },
   {
     name: "Warm gray",
@@ -44,8 +56,6 @@ export const APPEARANCE_PRESETS: Array<{
       interfaceColor: "#e9e7e1",
       textColor: "#262520",
       mutedTextColor: "#77736b",
-      accentColor: "#bd6748",
-      defaultBallColor: "#d88952",
     },
   },
   {
@@ -54,11 +64,25 @@ export const APPEARANCE_PRESETS: Array<{
       interfaceColor: "#20221f",
       textColor: "#f1f2ed",
       mutedTextColor: "#a4aaa0",
-      accentColor: "#a3c96d",
-      defaultBallColor: "#96bf5e",
     },
   },
 ];
+
+export const applyAppearanceTheme = (
+  appearance: AppearanceSettings,
+  theme: AppearanceThemeColors,
+): AppearanceSettings => ({
+  ...appearance,
+  ...theme,
+});
+
+export const appearanceUsesTheme = (
+  appearance: AppearanceSettings,
+  theme: AppearanceThemeColors,
+) =>
+  appearance.interfaceColor === theme.interfaceColor &&
+  appearance.textColor === theme.textColor &&
+  appearance.mutedTextColor === theme.mutedTextColor;
 
 const createId = () =>
   globalThis.crypto?.randomUUID?.() ??
@@ -130,11 +154,25 @@ const migrateParameters = (
   };
 };
 
-export const loadProjects = (): SavedProject[] => {
+const projectKey = (accountId: string) =>
+  `${PROJECTS_KEY_PREFIX}:${accountId}`;
+
+export const loadProjects = (accountId?: string | null): SavedProject[] => {
+  if (!accountId) return [];
   try {
-    const parsed = JSON.parse(localStorage.getItem(PROJECTS_KEY) ?? "[]");
+    const key = projectKey(accountId);
+    const stored = localStorage.getItem(key);
+    const legacy = localStorage.getItem(LEGACY_PROJECTS_KEY);
+    const canMigrateLegacy =
+      accountId !== "airlab-admin" &&
+      !stored &&
+      Boolean(legacy) &&
+      !localStorage.getItem(LEGACY_MIGRATION_KEY);
+    const parsed = JSON.parse(
+      stored ?? (canMigrateLegacy ? legacy : null) ?? "[]",
+    );
     if (!Array.isArray(parsed)) return [];
-    return parsed
+    const projects = parsed
       .filter(
         (project): project is SavedProject =>
           typeof project?.id === "string" &&
@@ -143,23 +181,35 @@ export const loadProjects = (): SavedProject[] => {
       )
       .map((project) => ({
         ...project,
+        thumbnail:
+          typeof project.thumbnail === "string" &&
+          project.thumbnail.startsWith("data:image/")
+            ? project.thumbnail
+            : undefined,
         parameters: migrateParameters(project.parameters),
       }))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    if (canMigrateLegacy) {
+      localStorage.setItem(key, JSON.stringify(projects));
+      localStorage.setItem(LEGACY_MIGRATION_KEY, accountId);
+    }
+    return projects;
   } catch {
     return [];
   }
 };
 
-const writeProjects = (projects: SavedProject[]) => {
-  localStorage.setItem(PROJECTS_KEY, JSON.stringify(projects));
+const writeProjects = (accountId: string, projects: SavedProject[]) => {
+  localStorage.setItem(projectKey(accountId), JSON.stringify(projects));
 };
 
 export const upsertProject = (
+  accountId: string,
   projects: SavedProject[],
   name: string,
   parameters: BallParameters,
   existingId?: string | null,
+  thumbnail?: string | null,
 ) => {
   const now = new Date().toISOString();
   const existing = existingId
@@ -169,6 +219,7 @@ export const upsertProject = (
     id: existing?.id ?? createId(),
     name: name.trim() || "Untitled ball",
     parameters: { ...parameters },
+    thumbnail: thumbnail ?? existing?.thumbnail,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   };
@@ -176,13 +227,17 @@ export const upsertProject = (
     project,
     ...projects.filter((candidate) => candidate.id !== project.id),
   ];
-  writeProjects(next);
+  writeProjects(accountId, next);
   return { project, projects: next };
 };
 
-export const removeProject = (projects: SavedProject[], id: string) => {
+export const removeProject = (
+  accountId: string,
+  projects: SavedProject[],
+  id: string,
+) => {
   const next = projects.filter((project) => project.id !== id);
-  writeProjects(next);
+  writeProjects(accountId, next);
   return next;
 };
 

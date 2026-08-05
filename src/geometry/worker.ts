@@ -18,6 +18,8 @@ self.onmessage = async (event: MessageEvent<GenerationRequest>) => {
         result.previewPositions.buffer,
         result.previewIndices.buffer,
         result.previewNormals.buffer,
+        result.triangleMaterials!.buffer,
+        result.previewTriangleMaterials!.buffer,
       ],
     });
   } catch (error) {

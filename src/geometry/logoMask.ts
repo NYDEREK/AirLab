@@ -3,7 +3,9 @@ export interface RasterizedLogo {
   name: string;
 }
 
-const GRID_SIZE = 20;
+// A 64×64 source keeps SVG curves and diagonal logo edges recognisable while
+// remaining small enough to store inside a local project file.
+const GRID_SIZE = 64;
 
 export const rasterizeLogo = (file: File): Promise<RasterizedLogo> =>
   new Promise((resolve, reject) => {

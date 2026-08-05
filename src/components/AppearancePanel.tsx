@@ -2,6 +2,8 @@ import { Check, RotateCcw, X } from "lucide-react";
 import {
   APPEARANCE_PRESETS,
   DEFAULT_APPEARANCE,
+  appearanceUsesTheme,
+  applyAppearanceTheme,
   type AppearanceSettings,
 } from "../projects/store";
 
@@ -63,13 +65,14 @@ export function AppearancePanel({
         <span className="drawer-label">Theme presets</span>
         <div className="theme-presets">
           {APPEARANCE_PRESETS.map((preset) => {
-            const selected =
-              JSON.stringify(preset.values) === JSON.stringify(appearance);
+            const selected = appearanceUsesTheme(appearance, preset.values);
             return (
               <button
                 className={selected ? "is-selected" : ""}
                 key={preset.name}
-                onClick={() => onChange(preset.values)}
+                onClick={() =>
+                  onChange(applyAppearanceTheme(appearance, preset.values))
+                }
                 type="button"
               >
                 <i

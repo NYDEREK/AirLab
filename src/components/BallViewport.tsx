@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import {
   ACESFilmicToneMapping,
   AmbientLight,
@@ -29,10 +29,19 @@ interface BallViewportProps {
   accentColor: string;
 }
 
-export function BallViewport({ ball, accentColor }: BallViewportProps) {
+export interface BallViewportHandle {
+  captureThumbnail: () => string | null;
+}
+
+const THUMBNAIL_WIDTH = 480;
+const THUMBNAIL_HEIGHT = 300;
+
+export const BallViewport = forwardRef<BallViewportHandle, BallViewportProps>(
+function BallViewport({ ball, accentColor }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const groupRef = useRef<Group | null>(null);
   const rendererRef = useRef<WebGLRenderer | null>(null);
+  const sceneRef = useRef<Scene | null>(null);
   const cameraRef = useRef<PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const gridRef = useRef<GridHelper | null>(null);
@@ -43,6 +52,7 @@ export function BallViewport({ ball, accentColor }: BallViewportProps) {
     if (!container) return;
 
     const scene = new Scene();
+    sceneRef.current = scene;
     const camera = new PerspectiveCamera(35, 1, 0.1, 2_000);
     camera.position.set(84, 58, 92);
     cameraRef.current = camera;
@@ -147,6 +157,7 @@ export function BallViewport({ ball, accentColor }: BallViewportProps) {
       renderer.domElement.remove();
       groupRef.current = null;
       rendererRef.current = null;
+      sceneRef.current = null;
       cameraRef.current = null;
       controlsRef.current = null;
       gridRef.current = null;
@@ -183,13 +194,55 @@ export function BallViewport({ ball, accentColor }: BallViewportProps) {
     geometry.computeBoundingBox();
     geometry.computeBoundingSphere();
 
-    const material = new MeshStandardMaterial({
-      color: accentColor,
-      roughness: 0.86,
-      metalness: 0,
-      side: DoubleSide,
-    });
-    const mesh = new Mesh(geometry, material);
+    const bodyColor = ball.color || accentColor;
+    const materialColors =
+      ball.colorMode === "single"
+        ? [bodyColor, bodyColor, bodyColor]
+        : [
+            bodyColor,
+            ball.detailColor ?? "#f2f1ea",
+            ball.markingColor ?? "#20231f",
+          ];
+    const materials = materialColors.map(
+      (color) =>
+        new MeshStandardMaterial({
+          color,
+          roughness: 0.86,
+          metalness: 0,
+          side: DoubleSide,
+        }),
+    );
+    const triangleMaterials = ball.previewTriangleMaterials;
+    if (
+      triangleMaterials &&
+      triangleMaterials.length === ball.previewIndices.length / 3
+    ) {
+      let runStart = 0;
+      let runMaterial = triangleMaterials[0] ?? 0;
+      for (
+        let triangle = 1;
+        triangle <= triangleMaterials.length;
+        triangle += 1
+      ) {
+        const nextMaterial = triangleMaterials[triangle];
+        if (
+          triangle < triangleMaterials.length &&
+          nextMaterial === runMaterial
+        ) {
+          continue;
+        }
+        geometry.addGroup(
+          runStart * 3,
+          (triangle - runStart) * 3,
+          Math.max(0, Math.min(2, runMaterial)),
+        );
+        runStart = triangle;
+        runMaterial = nextMaterial ?? 0;
+      }
+    } else {
+      geometry.addGroup(0, ball.previewIndices.length, 0);
+    }
+    const mesh = new Mesh(geometry, materials);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     group.add(mesh);
@@ -213,5 +266,46 @@ export function BallViewport({ ball, accentColor }: BallViewportProps) {
     }
   }, [accentColor, ball]);
 
+  useImperativeHandle(ref, () => ({
+    captureThumbnail: () => {
+      const renderer = rendererRef.current;
+      const scene = sceneRef.current;
+      const camera = cameraRef.current;
+      const group = groupRef.current;
+      if (!renderer || !scene || !camera || !group?.children.length) return null;
+
+      renderer.render(scene, camera);
+      const source = renderer.domElement;
+      if (!source.width || !source.height) return null;
+
+      const thumbnail = document.createElement("canvas");
+      thumbnail.width = THUMBNAIL_WIDTH;
+      thumbnail.height = THUMBNAIL_HEIGHT;
+      const context = thumbnail.getContext("2d");
+      if (!context) return null;
+
+      context.fillStyle = "#f7f8f4";
+      context.fillRect(0, 0, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT);
+
+      const scale = Math.min(
+        THUMBNAIL_WIDTH / source.width,
+        THUMBNAIL_HEIGHT / source.height,
+      );
+      const drawWidth = source.width * scale;
+      const drawHeight = source.height * scale;
+      const drawX = (THUMBNAIL_WIDTH - drawWidth) / 2;
+      const drawY = (THUMBNAIL_HEIGHT - drawHeight) / 2;
+
+      context.drawImage(
+        source,
+        drawX,
+        drawY,
+        drawWidth,
+        drawHeight,
+      );
+      return thumbnail.toDataURL("image/webp", 0.82);
+    },
+  }), []);
+
   return <div className="viewport-canvas" ref={containerRef} />;
-}
+});

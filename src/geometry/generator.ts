@@ -35,6 +35,55 @@ import {
 
 let modulePromise: Promise<ManifoldToplevel> | undefined;
 
+type MaterialSlot = 0 | 1 | 2;
+type MaterialKind = "body" | "detail" | "marking";
+
+interface MaterialRegistry {
+  body: Set<number>;
+  detail: Set<number>;
+  marking: Set<number>;
+}
+
+const createMaterialRegistry = (): MaterialRegistry => ({
+  body: new Set(),
+  detail: new Set(),
+  marking: new Set(),
+});
+
+const materialSlot = (kind: MaterialKind): MaterialSlot =>
+  kind === "body" ? 0 : kind === "detail" ? 1 : 2;
+
+const tagSolid = (
+  solid: ManifoldSolid,
+  registry: MaterialRegistry,
+  kind: MaterialKind,
+) => {
+  const tagged = solid.asOriginal();
+  solid.delete();
+  registry[kind].add(tagged.originalID());
+  return tagged;
+};
+
+const triangleMaterials = (
+  mesh: ReturnType<ManifoldSolid["getMesh"]>,
+  registry: MaterialRegistry,
+) => {
+  const materials = new Uint8Array(mesh.triVerts.length / 3);
+  for (let run = 0; run < mesh.runOriginalID.length; run += 1) {
+    const originalId = mesh.runOriginalID[run];
+    const slot: MaterialSlot = registry.marking.has(originalId)
+      ? materialSlot("marking")
+      : registry.detail.has(originalId)
+        ? materialSlot("detail")
+        : materialSlot("body");
+    const firstTriangle = mesh.runIndex[run] / 3;
+    const lastTriangle =
+      (mesh.runIndex[run + 1] ?? mesh.triVerts.length) / 3;
+    materials.fill(slot, firstTriangle, lastTriangle);
+  }
+  return materials;
+};
+
 const getModule = async () => {
   if (!modulePromise) {
     modulePromise = Module().then((wasm) => {
@@ -228,21 +277,63 @@ const soccerPanelNetwork = (): Network => {
   return { vertices, edges };
 };
 
+const alignNetworkPole = (
+  network: Network,
+  parameters: BallParameters,
+): Network => {
+  if (network.vertices.length === 0) {
+    return network;
+  }
+  const target =
+    parameters.shape === "rugby"
+      ? new Vector3(1, 0, 0)
+      : new Vector3(0, 1, 0);
+  const source = network.vertices.reduce((closest, candidate) =>
+    candidate[0] * target.x +
+      candidate[1] * target.y +
+      candidate[2] * target.z >
+    closest[0] * target.x +
+      closest[1] * target.y +
+      closest[2] * target.z
+      ? candidate
+      : closest,
+  );
+  const rotation = new Quaternion().setFromUnitVectors(
+    new Vector3(...source).normalize(),
+    target,
+  );
+  return {
+    vertices: network.vertices.map((vertex) => {
+      const rotated = new Vector3(...vertex).applyQuaternion(rotation);
+      return [rotated.x, rotated.y, rotated.z];
+    }),
+    edges: network.edges,
+  };
+};
+
 const patternNetwork = (
   parameters: BallParameters,
   _radius: number,
 ): Network => {
+  let network: Network;
   if (parameters.seamPattern === "football") {
-    return soccerPanelNetwork();
+    network = soccerPanelNetwork();
+  } else {
+    const topology = createGeodesicSphere(
+      Math.max(1, Math.min(8, Math.round(parameters.cellFrequency))),
+    );
+    network =
+      parameters.pattern === "hexagons"
+        ? dualEdges(topology)
+        : {
+            vertices: topology.vertices,
+            edges: uniqueEdges(topology.faces),
+          };
   }
-  const topology = createGeodesicSphere(
-    Math.max(1, Math.min(8, Math.round(parameters.cellFrequency))),
-  );
-  if (parameters.pattern === "hexagons") return dualEdges(topology);
-  return {
-    vertices: topology.vertices,
-    edges: uniqueEdges(topology.faces),
-  };
+  // Keep a real lattice node at the keychain pole even before the loop is
+  // enabled. This lets the bare ring fuse directly to an existing rib and
+  // avoids rotating the user's pattern when the option is toggled.
+  return alignNetworkPole(network, parameters);
 };
 
 const networkSolid = (
@@ -785,12 +876,26 @@ const patternPoints = (parameters: BallParameters) => {
   return createGeodesicSphere(frequency).vertices;
 };
 
-const fitToDiameter = (
+interface FittedBallShape {
+  solid: ManifoldSolid;
+  center: Vector3;
+  keychainPole: Vector3;
+}
+
+const fitBallShape = (
   solid: ManifoldSolid,
-  diameter: number,
-): ManifoldSolid => {
-  const bounds = solid.boundingBox();
-  const center: Vec3Tuple = [
+  parameters: BallParameters,
+): FittedBallShape => {
+  const shapeScale: Vec3Tuple =
+    parameters.shape === "rugby"
+      ? [parameters.rugbyAspectRatio, 1, 1]
+      : [1, 1, 1];
+  const shaped =
+    parameters.shape === "rugby" ? solid.scale(shapeScale) : solid;
+  if (shaped !== solid) solid.delete();
+
+  const bounds = shaped.boundingBox();
+  const boundsCenter: Vec3Tuple = [
     (bounds.min[0] + bounds.max[0]) / 2,
     (bounds.min[1] + bounds.max[1]) / 2,
     (bounds.min[2] + bounds.max[2]) / 2,
@@ -800,12 +905,154 @@ const fitToDiameter = (
     bounds.max[1] - bounds.min[1],
     bounds.max[2] - bounds.min[2],
   );
-  const centered = solid.translate([-center[0], -center[1], -center[2]]);
+  const scale = size > 0 ? parameters.diameter / size : 1;
+  const centered = shaped.translate([
+    -boundsCenter[0],
+    -boundsCenter[1],
+    -boundsCenter[2],
+  ]);
+  shaped.delete();
+  const fitted = scale === 1 ? centered : centered.scale(scale);
+  if (fitted !== centered) centered.delete();
+
+  // Decorations can make the fitted bounding box asymmetric. Preserve the
+  // transformed position of the original sphere center instead of assuming
+  // that it is still the world origin when positioning the keychain.
+  const center = new Vector3(
+    -boundsCenter[0] * scale,
+    -boundsCenter[1] * scale,
+    -boundsCenter[2] * scale,
+  );
+  const sourceRadius = parameters.diameter / 2;
+  const poleOffset =
+    parameters.shape === "rugby"
+      ? new Vector3(
+          (bounds.max[0] - boundsCenter[0]) * scale - center.x,
+          0,
+          0,
+        )
+      : new Vector3(0, sourceRadius * scale, 0);
+  return {
+    solid: fitted,
+    center,
+    keychainPole: center.clone().add(poleOffset),
+  };
+};
+
+const keychainProfile = (
+  majorRadius: number,
+  thickness: number,
+  roundness: number,
+  cornerSegments: number,
+): Vec2[] => {
+  const half = thickness / 2;
+  const radius = half * Math.max(0, Math.min(1, roundness / 100));
+  if (radius <= 0.02) {
+    return [
+      [majorRadius - half, -half],
+      [majorRadius + half, -half],
+      [majorRadius + half, half],
+      [majorRadius - half, half],
+    ];
+  }
+  const points: Vec2[] = [];
+  const corners = [
+    [majorRadius + half - radius, half - radius, 0],
+    [majorRadius - half + radius, half - radius, 90],
+    [majorRadius - half + radius, -half + radius, 180],
+    [majorRadius + half - radius, -half + radius, 270],
+  ] as const;
+  corners.forEach(([centerX, centerY, startDegrees]) => {
+    for (let step = 0; step <= cornerSegments; step += 1) {
+      const angle =
+        ((startDegrees + (step / cornerSegments) * 90) * Math.PI) / 180;
+      points.push([
+        centerX + Math.cos(angle) * radius,
+        centerY + Math.sin(angle) * radius,
+      ]);
+    }
+  });
+  return points;
+};
+
+const applyKeychain = (
+  wasm: ManifoldToplevel,
+  base: ManifoldSolid,
+  parameters: BallParameters,
+  registry: MaterialRegistry,
+  ballCenter: Vector3,
+  keychainPole: Vector3,
+) => {
+  if (!parameters.keychainEnabled) return base;
+  const outerRadius = Math.max(3, parameters.keychainOuterDiameter / 2);
+  const innerRadius = Math.max(
+    1.25,
+    Math.min(
+      outerRadius - 0.8,
+      parameters.keychainHoleDiameter / 2,
+    ),
+  );
+  const ringThickness = outerRadius - innerRadius;
+  const segments = STRUT_SEGMENTS[parameters.quality];
+  const profile = keychainProfile(
+    (outerRadius + innerRadius) / 2,
+    ringThickness,
+    parameters.keychainRoundness,
+    parameters.quality === "fine"
+      ? 10
+      : parameters.quality === "standard"
+        ? 7
+        : 4,
+  );
+  const section = new wasm.CrossSection([profile], "EvenOdd");
+  let ring = section.revolve(segments);
+  section.delete();
+
+  // Always use the exact geometric pole. Snapping to a nearby pattern vertex
+  // visibly moved the loop away from the ball axis on perforated models.
+  const anchor = keychainPole.clone();
+  const outward = anchor.clone().sub(ballCenter).normalize();
+  const surfaceOffset = Math.max(
+    -outerRadius * 0.8,
+    Math.min(
+      ringThickness * 0.32,
+      parameters.keychainSurfaceOffset,
+    ),
+  );
+  const center = anchor
+    .clone()
+    .addScaledVector(
+      outward,
+      outerRadius - ringThickness * 0.42 + surfaceOffset,
+    );
+  const rotation = new Matrix4().makeRotationAxis(
+    outward,
+    (parameters.keychainRotation * Math.PI) / 180,
+  );
+  rotation.setPosition(center);
+  const positionedRing = ring.transform(matrixElements(rotation));
+  ring.delete();
+  ring = positionedRing;
+  const tagged = tagSolid(ring, registry, "body");
+  const result = base.add(tagged);
+  base.delete();
+  tagged.delete();
+  return result;
+};
+
+const keepLargestPrintableComponent = (solid: ManifoldSolid) => {
+  const components = solid.decompose();
+  if (components.length <= 1) {
+    components.forEach((component) => component.delete());
+    return solid;
+  }
+  components.sort(
+    (left, right) => Math.abs(right.volume()) - Math.abs(left.volume()),
+  );
+  const largest = components[0];
+  components.slice(1).forEach((component) => component.delete());
   solid.delete();
-  if (size <= 0) return centered;
-  const fitted = centered.scale(diameter / size);
-  centered.delete();
-  return fitted;
+  return largest;
 };
 
 const baseSolid = (
@@ -1079,6 +1326,19 @@ const sampledLoop = (
   return { vertices, edges };
 };
 
+const sampledPath = (
+  sampler: (amount: number) => Vec3Tuple,
+  samples = 64,
+) => {
+  const vertices: Vec3Tuple[] = [];
+  const edges: Array<[number, number]> = [];
+  for (let index = 0; index <= samples; index += 1) {
+    vertices.push(normalize(sampler(index / samples)));
+    if (index > 0) edges.push([index - 1, index]);
+  }
+  return { vertices, edges };
+};
+
 const joinNetworks = (networks: Network[]): Network => {
   const vertices: Vec3Tuple[] = [];
   const edges: Array<[number, number]> = [];
@@ -1226,6 +1486,16 @@ const customBandNetworkSet = (bands: CustomBand[]): Network | null => {
   return joinNetworks(bands.slice(0, 8).map(customBandNetwork));
 };
 
+const rugbyPanelNetwork = (): Network =>
+  joinNetworks([
+    sampledLoop((angle) => [Math.cos(angle), Math.sin(angle), 0], 192),
+    sampledLoop((angle) => [Math.cos(angle), 0, Math.sin(angle)], 192),
+    sampledPath((amount) => {
+      const x = -0.38 + amount * 0.76;
+      return [x, 0, Math.sqrt(Math.max(0, 1 - x * x))];
+    }, 64),
+  ]);
+
 const baseballPoint = (
   angle: number,
   curvature: number,
@@ -1328,9 +1598,46 @@ const seamNetwork = (parameters: BallParameters): Network | null => {
         (angle) => baseballPoint(angle, parameters.seamCurvature),
         256,
       );
+    case "rugby":
+      return rugbyPanelNetwork();
     default:
       return null;
   }
+};
+
+const rugbyLaces = (
+  wasm: ManifoldToplevel,
+  parameters: BallParameters,
+  surfaceRadius: number,
+  segments: number,
+) => {
+  const parts: ManifoldSolid[] = [];
+  const laceRadius = Math.max(
+    0.25,
+    Math.min(1.15, parameters.seamWidth * 0.13),
+  );
+  const halfSpan = Math.min(
+    0.12,
+    (parameters.seamWidth * 0.72) / Math.max(1, surfaceRadius),
+  );
+  const count = 8;
+  for (let index = 0; index < count; index += 1) {
+    const x = -0.3 + (index / (count - 1)) * 0.6;
+    const z = Math.sqrt(
+      Math.max(0, 1 - x * x - halfSpan * halfSpan),
+    );
+    const radius = surfaceRadius + laceRadius * 0.22;
+    parts.push(
+      cylinderBetween(
+        wasm,
+        [x * radius, -halfSpan * radius, z * radius],
+        [x * radius, halfSpan * radius, z * radius],
+        laceRadius,
+        Math.max(8, segments),
+      ),
+    );
+  }
+  return combine(wasm, parts);
 };
 
 const baseballStitches = (
@@ -1341,8 +1648,17 @@ const baseballStitches = (
   segments: number,
 ) => {
   const parts: ManifoldSolid[] = [];
-  const stitchRadius = Math.max(0.28, Math.min(0.62, seamWidth * 0.09));
-  const count = 54;
+  const stitchRadius = Math.max(
+    0.15,
+    Math.min(
+      seamWidth * 0.22,
+      parameters.baseballStitchThickness / 2,
+    ),
+  );
+  const count = Math.max(
+    18,
+    Math.min(96, Math.round(parameters.baseballStitchDensity)),
+  );
   const centerRadius = surfaceRadius + stitchRadius * 0.12;
 
   for (let index = 0; index < count; index += 1) {
@@ -1397,6 +1713,7 @@ const applySeams = (
   parameters: BallParameters,
   bodyRadius: number,
   envelopeRadius: number,
+  registry: MaterialRegistry,
   openStructure = false,
 ) => {
   const network = seamNetwork(parameters);
@@ -1442,13 +1759,30 @@ const applySeams = (
       seams = stitchedSeams;
     }
 
+    if (
+      parameters.seamPattern === "rugby" &&
+      parameters.seamOperation === "raised"
+    ) {
+      const laces = rugbyLaces(
+        wasm,
+        parameters,
+        outerRadius,
+        STRUT_SEGMENTS[parameters.quality],
+      );
+      const lacedSeams = seams.add(laces);
+      seams.delete();
+      laces.delete();
+      seams = lacedSeams;
+    }
+
+    seams = tagSolid(seams, registry, "detail");
     const result = base.add(seams);
     base.delete();
     seams.delete();
     return result;
   }
 
-  const cutter = ribbonNetworkSolid(
+  let cutter = ribbonNetworkSolid(
     wasm,
     network,
     Math.max(0.1, bodyRadius - parameters.seamDepth),
@@ -1457,6 +1791,7 @@ const applySeams = (
     segments,
     parameters.seamProfile === "rounded",
   );
+  cutter = tagSolid(cutter, registry, "detail");
   const result = base.subtract(cutter);
   base.delete();
   cutter.delete();
@@ -1531,11 +1866,20 @@ const effectiveMarkings = (parameters: BallParameters): BallMarking[] => {
       operation: parameters.markingOperation,
       text: parameters.markingText,
       logoMask: parameters.markingLogoMask,
+      vectorData: "",
       logoName: parameters.markingLogoName,
+      font: "modern",
+      placement:
+        parameters.seamPattern === "none" ? "surface" : "band",
       size: parameters.markingSize,
       height: parameters.markingHeight,
       bandIndex: 0,
-      position: 50,
+      position:
+        parameters.seamPattern === "none" ? 62 : 50,
+      latitude:
+        parameters.seamPattern === "none" ? 20 : 0,
+      rotation: 0,
+      framePadding: 3,
     },
   ];
 };
@@ -1545,7 +1889,7 @@ const markingMask = (marking: BallMarking) => {
     return marking.logoMask
       .split("/")
       .filter((row) => /^[01]+$/.test(row))
-      .slice(0, 24);
+      .slice(0, 96);
   }
   if (marking.type === "text") {
     return textMask(marking.text.trim() || "AIRLAB");
@@ -1553,76 +1897,405 @@ const markingMask = (marking: BallMarking) => {
   return [];
 };
 
-const applySingleMarking = (
+interface PlanarMarking {
+  contours: Vec2[][];
+  groups: Vec2[][][];
+  width: number;
+  height: number;
+}
+
+interface ParsedVectorGeometry {
+  contours: Vec2[][];
+  groups: number[][];
+}
+
+const parsedVectorGeometry = (source: string): ParsedVectorGeometry => {
+  if (!source) return { contours: [], groups: [] };
+  try {
+    const parsed = JSON.parse(source) as unknown;
+    const rawContours = Array.isArray(parsed)
+      ? parsed
+      : parsed &&
+          typeof parsed === "object" &&
+          Array.isArray((parsed as { contours?: unknown }).contours)
+        ? (parsed as { contours: unknown[] }).contours
+        : [];
+    const contours = rawContours
+      .filter((contour): contour is unknown[] => Array.isArray(contour))
+      .map((contour) =>
+        contour
+          .filter(
+            (point): point is [number, number] =>
+              Array.isArray(point) &&
+              point.length === 2 &&
+              Number.isFinite(point[0]) &&
+              Number.isFinite(point[1]),
+          )
+          .map(([x, y]) => [x, y] as Vec2),
+      )
+      .filter((contour) => contour.length >= 3);
+    const rawGroups =
+      !Array.isArray(parsed) &&
+      parsed &&
+      typeof parsed === "object" &&
+      Array.isArray((parsed as { groups?: unknown }).groups)
+        ? (parsed as { groups: unknown[] }).groups
+        : [];
+    const groups = rawGroups
+      .filter((group): group is unknown[] => Array.isArray(group))
+      .map((group) =>
+        group.filter(
+          (index): index is number =>
+            typeof index === "number" &&
+            Number.isInteger(index) &&
+            index >= 0 &&
+            index < contours.length,
+        ),
+      )
+      .filter((group) => group.length > 0);
+    return { contours, groups };
+  } catch {
+    return { contours: [], groups: [] };
+  }
+};
+
+const maskContours = (rows: string[]): Vec2[][] => {
+  const rowCount = rows.length;
+  const columnCount = Math.max(0, ...rows.map((row) => row.length));
+  if (rowCount === 0 || columnCount === 0) return [];
+  const scale = 1 / Math.max(rowCount, columnCount);
+  const contours: Vec2[][] = [];
+  rows.forEach((row, rowIndex) => {
+    let column = 0;
+    while (column < row.length) {
+      if (row[column] !== "1") {
+        column += 1;
+        continue;
+      }
+      const start = column;
+      while (column < row.length && row[column] === "1") column += 1;
+      const end = column;
+      const left = (start - columnCount / 2) * scale;
+      const right = (end - columnCount / 2) * scale;
+      const top = (rowCount / 2 - rowIndex) * scale;
+      const bottom = (rowCount / 2 - rowIndex - 1) * scale;
+      contours.push([
+        [left, bottom],
+        [right, bottom],
+        [right, top],
+        [left, top],
+      ]);
+    }
+  });
+  return contours;
+};
+
+const markingPlanarGeometry = (marking: BallMarking): PlanarMarking | null => {
+  const vector = parsedVectorGeometry(marking.vectorData ?? "");
+  const contours =
+    vector.contours.length > 0
+      ? vector.contours
+      : maskContours(markingMask(marking));
+  const points = contours.flat();
+  if (points.length === 0) return null;
+  const minX = Math.min(...points.map(([x]) => x));
+  const maxX = Math.max(...points.map(([x]) => x));
+  const minY = Math.min(...points.map(([, y]) => y));
+  const maxY = Math.max(...points.map(([, y]) => y));
+  const sourceWidth = Math.max(1e-5, maxX - minX);
+  const sourceHeight = Math.max(1e-5, maxY - minY);
+  const targetScale =
+    marking.size /
+    (marking.type === "text"
+      ? sourceWidth
+      : Math.max(sourceWidth, sourceHeight));
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+  const scaledContours = contours.map((contour) =>
+      contour.map(
+        ([x, y]) =>
+          [
+            (x - centerX) * targetScale,
+            (y - centerY) * targetScale,
+          ] as Vec2,
+      ),
+    );
+  const groupIndexes =
+    marking.type === "text" && vector.groups.length > 0
+      ? vector.groups
+      : scaledContours.map((_, index) => [index]);
+  return {
+    contours: scaledContours,
+    groups: groupIndexes.map((group) =>
+      group.map((index) => scaledContours[index]).filter(Boolean),
+    ),
+    width: sourceWidth * targetScale,
+    height: sourceHeight * targetScale,
+  };
+};
+
+const roundedRectangle = (
+  width: number,
+  height: number,
+  cornerRadius: number,
+): Vec2[] => {
+  const radius = Math.max(
+    0.4,
+    Math.min(cornerRadius, width / 2, height / 2),
+  );
+  const points: Vec2[] = [];
+  const corners = [
+    [width / 2 - radius, height / 2 - radius, 0],
+    [-width / 2 + radius, height / 2 - radius, 90],
+    [-width / 2 + radius, -height / 2 + radius, 180],
+    [width / 2 - radius, -height / 2 + radius, 270],
+  ] as const;
+  corners.forEach(([centerX, centerY, startDegrees]) => {
+    for (let step = 0; step <= 6; step += 1) {
+      const angle = ((startDegrees + (step / 6) * 90) * Math.PI) / 180;
+      points.push([
+        centerX + Math.cos(angle) * radius,
+        centerY + Math.sin(angle) * radius,
+      ]);
+    }
+  });
+  return points;
+};
+
+const extrudeContours = (
+  wasm: ManifoldToplevel,
+  contours: Vec2[][],
+  depth: number,
+  maximumEdgeLength?: number,
+  topScale: Vec2 = [1, 1],
+) => {
+  const section = new wasm.CrossSection(contours, "EvenOdd");
+  const solid = wasm.Manifold.extrude(
+    section,
+    Math.max(0.2, depth),
+    0,
+    0,
+    topScale,
+    true,
+  );
+  section.delete();
+  const refined =
+    maximumEdgeLength === undefined
+      ? solid.refine(2)
+      : solid.refineToLength(Math.max(0.45, maximumEdgeLength));
+  solid.delete();
+  return refined;
+};
+
+const markingEdgeLength = (surfaceRadius: number) =>
+  Math.max(0.45, Math.min(0.85, surfaceRadius / 55));
+
+const markingFrame = (marking: BallMarking) => {
+  const longitude = ((marking.position - 50) / 100) * Math.PI * 2;
+  const latitude = ((marking.latitude ?? 0) * Math.PI) / 180;
+  const normal = new Vector3(
+    Math.cos(latitude) * Math.sin(longitude),
+    Math.sin(latitude),
+    Math.cos(latitude) * Math.cos(longitude),
+  ).normalize();
+  const east = new Vector3(Math.cos(longitude), 0, -Math.sin(longitude));
+  const north = normal.clone().cross(east).normalize();
+  const rotation = ((marking.rotation ?? 0) * Math.PI) / 180;
+  const tangent = east
+    .clone()
+    .multiplyScalar(Math.cos(rotation))
+    .addScaledVector(north, Math.sin(rotation))
+    .normalize();
+  const across = normal.clone().cross(tangent).normalize();
+  return { normal, tangent, across };
+};
+
+const sphericalSurfaceSolid = (
+  wasm: ManifoldToplevel,
+  contours: Vec2[][],
+  depth: number,
+  surfaceRadius: number,
+  centerRadius: number,
+  marking: BallMarking,
+  maximumEdgeLength: number,
+  topScale: Vec2 = [1, 1],
+) => {
+  const { normal, tangent, across } = markingFrame(marking);
+  const flat = extrudeContours(
+    wasm,
+    contours,
+    depth,
+    maximumEdgeLength,
+    topScale,
+  );
+  const positioned = flat.warp((vertex) => {
+    const localX = vertex[0];
+    const localY = vertex[1];
+    const distance = Math.hypot(localX, localY);
+    const direction = normal.clone();
+    if (distance > 1e-8) {
+      const angle = distance / Math.max(1, surfaceRadius);
+      direction
+        .multiplyScalar(Math.cos(angle))
+        .addScaledVector(
+          tangent,
+          (localX / distance) * Math.sin(angle),
+        )
+        .addScaledVector(
+          across,
+          (localY / distance) * Math.sin(angle),
+        )
+        .normalize();
+    }
+    const radius = centerRadius + vertex[2];
+    vertex[0] = direction.x * radius;
+    vertex[1] = direction.y * radius;
+    vertex[2] = direction.z * radius;
+  });
+  flat.delete();
+  return positioned;
+};
+
+const applySingleSurfaceMarking = (
   wasm: ManifoldToplevel,
   base: ManifoldSolid,
+  parameters: BallParameters,
   marking: BallMarking,
   surfaceRadius: number,
+  registry: MaterialRegistry,
+  needsBacking = false,
 ) => {
-  const rows = markingMask(marking);
-  const width = Math.max(0, ...rows.map((row) => row.length));
-  if (rows.length === 0 || width === 0) return base;
-
-  const pixelSize = marking.size / Math.max(width, rows.length);
-  const parts: ManifoldSolid[] = [];
-  const height = Math.max(0.2, marking.height);
+  const planar = markingPlanarGeometry(marking);
+  if (!planar) return base;
+  const padding = Math.max(1, marking.framePadding ?? 3);
+  const frameWidth = planar.width + padding * 2;
+  const frameHeight = planar.height + padding * 2;
+  const frameContour = roundedRectangle(
+    frameWidth,
+    frameHeight,
+    Math.min(padding, frameHeight * 0.3),
+  );
   const operation = marking.operation;
-  const overlap = operation === "raised" ? 0.65 : 0.3;
-  const longitude = ((marking.position - 50) / 100) * Math.PI * 2;
-  const centerNormal = new Vector3(
-    Math.sin(longitude),
+  const overlap = 0.4;
+  const markingDepth = Math.max(0.25, marking.height);
+  const frameRise = Math.max(
     0,
-    Math.cos(longitude),
+    Math.min(
+      4,
+      marking.frameHeight ?? Math.max(0.9, marking.height * 0.72),
+    ),
   );
-  const centerTangent = new Vector3(
-    Math.cos(longitude),
-    0,
-    -Math.sin(longitude),
+  const islandBevel = Math.min(
+    1.6,
+    Math.max(0.65, padding * 0.48),
+    Math.max(0.65, padding - 0.7),
   );
-  const centerAcross = centerNormal.clone().cross(centerTangent).normalize();
-  for (let row = 0; row < rows.length; row += 1) {
-    for (let column = 0; column < rows[row].length; column += 1) {
-      if (rows[row][column] !== "1") continue;
-      const x = (column - (width - 1) / 2) * pixelSize;
-      const y = ((rows.length - 1) / 2 - row) * pixelSize;
-      const normal = centerNormal
-        .clone()
-        .add(centerTangent.clone().multiplyScalar(x / surfaceRadius))
-        .add(centerAcross.clone().multiplyScalar(y / surfaceRadius))
-        .normalize();
-      const centerRadius =
-        operation === "raised"
-          ? surfaceRadius + (height - overlap) / 2
-          : surfaceRadius + (overlap - height) / 2;
-      const localTangent = centerTangent
-        .clone()
-        .addScaledVector(normal, -centerTangent.dot(normal))
-        .normalize();
-      const localAcross = normal.clone().cross(localTangent).normalize();
-      const markingMatrix = new Matrix4()
-        .makeBasis(localTangent, localAcross, normal)
-        .setPosition(normal.clone().multiplyScalar(centerRadius));
-      const primitive = wasm.Manifold.cube(
-        [pixelSize * 1.18, pixelSize * 1.18, height + overlap],
-        true,
-      );
-      const transformed = primitive.transform(
-        matrixElements(markingMatrix),
-      );
-      primitive.delete();
-      parts.push(transformed);
-    }
-  }
+  const frameTopWidth = Math.max(
+    planar.width + 1.4,
+    frameWidth - islandBevel * 2,
+  );
+  const frameTopHeight = Math.max(
+    planar.height + 1.4,
+    frameHeight - islandBevel * 2,
+  );
+  const frameTopScale: Vec2 = [
+    Math.min(1, frameTopWidth / frameWidth),
+    Math.min(1, frameTopHeight / frameHeight),
+  ];
+  const raisedPatternInset =
+    parameters.mode !== "lattice" &&
+    parameters.pattern !== "none" &&
+    (parameters.mode === "solid" || parameters.mode === "shell") &&
+    parameters.effect === "raised"
+      ? parameters.featureHeight
+      : 0;
+  const raisedSeamInset =
+    parameters.mode !== "lattice" &&
+    parameters.seamPattern !== "none" &&
+    parameters.seamOperation === "raised"
+      ? parameters.seamDepth
+      : 0;
+  const printableSkinDepth =
+    parameters.mode === "lattice"
+      ? parameters.featureWidth +
+        (parameters.seamPattern !== "none" &&
+        parameters.seamOperation === "raised"
+          ? parameters.seamDepth
+          : 0)
+      : parameters.wallThickness +
+        Math.max(raisedPatternInset, raisedSeamInset);
+  // Stop the island at the model's inner skin. The previous feature-width
+  // multiplier pushed a thick plug several millimetres into small balls.
+  const structuralBacking = needsBacking
+    ? Math.max(0.5, printableSkinDepth + 0.08)
+    : overlap;
+  const backingDepth = Math.max(
+    structuralBacking,
+    markingDepth - frameRise + 0.45,
+  );
+  let result = base;
 
-  if (parts.length === 0) return base;
-  const markingSolid = combine(wasm, parts);
-  const result =
+  let frame = sphericalSurfaceSolid(
+    wasm,
+    [frameContour],
+    backingDepth + frameRise,
+    surfaceRadius,
+    surfaceRadius + (frameRise - backingDepth) / 2,
+    marking,
+    markingEdgeLength(surfaceRadius) * 1.6,
+    frameTopScale,
+  );
+  frame = tagSolid(frame, registry, "detail");
+  const framed = result.add(frame);
+  result.delete();
+  frame.delete();
+  result = framed;
+
+  const markingOverlap = 0.28;
+  const artworkSurface = surfaceRadius + frameRise;
+  const makeArtwork = (depth: number, centerRadius: number) =>
+    sphericalSurfaceSolid(
+      wasm,
+      planar.contours,
+      depth,
+      surfaceRadius,
+      centerRadius,
+      marking,
+      markingEdgeLength(surfaceRadius),
+    );
+  let artwork = makeArtwork(
+    markingDepth + markingOverlap,
     operation === "raised"
-      ? base.add(markingSolid)
-      : base.subtract(markingSolid);
-  base.delete();
-  markingSolid.delete();
-  return result;
+      ? artworkSurface + (markingDepth - markingOverlap) / 2
+      : artworkSurface + (markingOverlap - markingDepth) / 2,
+  );
+  artwork = tagSolid(
+    artwork,
+    registry,
+    operation === "raised" ? "marking" : "detail",
+  );
+  let finished =
+    operation === "raised"
+      ? result.add(artwork)
+      : result.subtract(artwork);
+  result.delete();
+  artwork.delete();
+  if (operation === "engraved") {
+    const inlayThickness = Math.min(0.14, markingDepth * 0.3);
+    const inlayOverlap = 0.04;
+    let inlay = makeArtwork(
+      inlayThickness + inlayOverlap,
+      artworkSurface -
+        markingDepth +
+        (inlayThickness - inlayOverlap) / 2,
+    );
+    inlay = tagSolid(inlay, registry, "marking");
+    const withInlay = inlay.add(finished);
+    finished.delete();
+    inlay.delete();
+    finished = withInlay;
+  }
+  return finished;
 };
 
 const applyMarking = (
@@ -1630,10 +2303,20 @@ const applyMarking = (
   base: ManifoldSolid,
   parameters: BallParameters,
   surfaceRadius: number,
+  registry: MaterialRegistry,
 ) =>
   effectiveMarkings(parameters).reduce(
     (result, marking) =>
-      applySingleMarking(wasm, result, marking, surfaceRadius),
+      applySingleSurfaceMarking(
+        wasm,
+        result,
+        parameters,
+        marking,
+        surfaceRadius,
+        registry,
+        parameters.mode === "perforated" ||
+          parameters.pattern !== "none",
+      ),
     base,
   );
 
@@ -1871,36 +2554,42 @@ const applySingleSeamMarking = (
   parameters: BallParameters,
   marking: BallMarking,
   surfaceRadius: number,
+  registry: MaterialRegistry,
 ) => {
-  const rows = markingMask(marking);
-  const width = Math.max(0, ...rows.map((row) => row.length));
+  const planar = markingPlanarGeometry(marking);
   const path = seamMarkingPath(parameters, marking.bandIndex);
-  if (rows.length === 0 || width === 0 || !path) return base;
-
-  const requestedPixelSize =
-    marking.size / Math.max(width, rows.length);
-  const bandPixelSize =
-    (parameters.seamWidth * 0.82) / Math.max(1, rows.length);
-  const pixelSize = Math.max(
-    0.18,
-    Math.min(requestedPixelSize, bandPixelSize),
+  if (!planar || !path) return base;
+  const verticalScale = Math.min(
+    1,
+    (parameters.seamWidth * 0.72) / Math.max(0.2, planar.height),
   );
-  const height = Math.max(0.2, marking.height);
+  const contours = planar.contours.map((contour) =>
+    contour.map(([x, y]) => [x, y * verticalScale] as Vec2),
+  );
   const operation = marking.operation;
+  const requestedHeight = Math.max(0.2, marking.height);
+  const height =
+    operation === "raised"
+      ? requestedHeight
+      : Math.min(
+          requestedHeight,
+          Math.max(0.45, parameters.seamDepth + 0.25),
+        );
   const overlap = operation === "raised" ? 0.48 : 0.36;
   const centerRadius =
     operation === "raised"
       ? surfaceRadius + (height - overlap) / 2
       : surfaceRadius + (overlap - height) / 2;
-  const parts: ManifoldSolid[] = [];
-
-  for (let row = 0; row < rows.length; row += 1) {
-    for (let column = 0; column < rows[row].length; column += 1) {
-      if (rows[row][column] !== "1") continue;
-      const horizontal =
-        (column - (width - 1) / 2) * pixelSize;
-      const vertical =
-        ((rows.length - 1) / 2 - row) * pixelSize;
+  const seamSolid = (depth: number, radialCenter: number) => {
+    const flat = extrudeContours(
+      wasm,
+      contours,
+      depth,
+      markingEdgeLength(surfaceRadius),
+    );
+    const curved = flat.warp((vertex) => {
+      const horizontal = vertex[0];
+      const vertical = vertex[1];
       const sample = sampleSeamMarkingPath(
         path,
         (path.closed
@@ -1909,45 +2598,34 @@ const applySingleSeamMarking = (
             path.centerAngle) +
           horizontal / surfaceRadius,
       );
-      const centerAcross = sample.normal
+      const across = sample.normal
         .clone()
         .cross(sample.tangent)
         .normalize();
-      const localNormal = sample.normal
+      const verticalAngle = vertical / surfaceRadius;
+      const normal = sample.normal
         .clone()
-        .add(
-          centerAcross.multiplyScalar(vertical / surfaceRadius),
-        )
+        .multiplyScalar(Math.cos(verticalAngle))
+        .addScaledVector(across, Math.sin(verticalAngle))
         .normalize();
-      const localTangent = sample.tangent
-        .clone()
-        .addScaledVector(
-          localNormal,
-          -sample.tangent.dot(localNormal),
-        )
-        .normalize();
-      const localAcross = localNormal
-        .clone()
-        .cross(localTangent)
-        .normalize();
-      const markingMatrix = new Matrix4()
-        .makeBasis(localTangent, localAcross, localNormal)
-        .setPosition(localNormal.clone().multiplyScalar(centerRadius));
-      const primitive = wasm.Manifold.cube(
-        [pixelSize * 1.18, pixelSize * 1.18, height + overlap],
-        true,
-      );
-      const transformed = primitive.transform(
-        matrixElements(markingMatrix),
-      );
-      primitive.delete();
-      parts.push(transformed);
-    }
-  }
-
-  if (parts.length === 0) return base;
-  const markingSolid = combine(wasm, parts);
-  const result =
+      const radius = radialCenter + vertex[2];
+      vertex[0] = normal.x * radius;
+      vertex[1] = normal.y * radius;
+      vertex[2] = normal.z * radius;
+    });
+    flat.delete();
+    return curved;
+  };
+  // Treat the marking as a layer between two concentric spherical
+  // surfaces. Vertices on both faces share the same radial direction,
+  // so raised text cannot fan into wedges and engraved walls stay radial.
+  let markingSolid = seamSolid(height + overlap, centerRadius);
+  markingSolid = tagSolid(
+    markingSolid,
+    registry,
+    operation === "raised" ? "marking" : "detail",
+  );
+  let result =
     operation === "raised"
       ? base.add(markingSolid)
       : base.subtract(markingSolid);
@@ -1960,17 +2638,32 @@ const applySeamMarking = (
   wasm: ManifoldToplevel,
   base: ManifoldSolid,
   parameters: BallParameters,
-  surfaceRadius: number,
+  bandSurfaceRadius: number,
+  outerSurfaceRadius: number,
+  registry: MaterialRegistry,
 ) =>
   effectiveMarkings(parameters).reduce(
     (result, marking) =>
-      applySingleSeamMarking(
-        wasm,
-        result,
-        parameters,
-        marking,
-        surfaceRadius,
-      ),
+      marking.placement === "surface"
+        ? applySingleSurfaceMarking(
+            wasm,
+            result,
+            parameters,
+            marking,
+            outerSurfaceRadius,
+            registry,
+            parameters.mode === "lattice" ||
+              parameters.mode === "perforated" ||
+              parameters.pattern !== "none",
+          )
+        : applySingleSeamMarking(
+            wasm,
+            result,
+            parameters,
+            marking,
+            bandSurfaceRadius,
+            registry,
+          ),
     base,
   );
 
@@ -1979,38 +2672,171 @@ const applyAirlessMarking = (
   base: ManifoldSolid,
   parameters: BallParameters,
   surfaceRadius: number,
+  registry: MaterialRegistry,
 ) => {
-  return effectiveMarkings(parameters).reduce((result, marking) => {
-    const backingWidth = Math.max(10, marking.size * 1.12);
-    const backingHeight =
-      marking.type === "logo"
-        ? Math.max(10, marking.size * 1.05)
-        : Math.max(8, marking.size * 0.4);
-    const backingDepth = Math.max(1.6, parameters.featureWidth * 1.5);
-    const longitude = ((marking.position - 50) / 100) * Math.PI * 2;
-    const direction: Vec3Tuple = [
-      Math.sin(longitude),
-      0,
-      Math.cos(longitude),
-    ];
-    const primitive = wasm.Manifold.cube(
-      [backingWidth, backingHeight, backingDepth],
+  return effectiveMarkings(parameters).reduce(
+    (result, marking) =>
+      applySingleSurfaceMarking(
+        wasm,
+        result,
+        parameters,
+        marking,
+        surfaceRadius,
+        registry,
+        true,
+      ),
+    base,
+  );
+};
+
+const standBaseSolid = (
+  wasm: ManifoldToplevel,
+  parameters: BallParameters,
+) => {
+  const size = parameters.standBaseSize;
+  const height = parameters.standHeight;
+  let base: ManifoldSolid;
+  if (parameters.standBaseShape === "square") {
+    base = wasm.Manifold.cube([size, size, height], true);
+  } else {
+    const radius =
+      parameters.standBaseShape === "octagon"
+        ? size / (2 * Math.cos(Math.PI / 8))
+        : size / 2;
+    base = wasm.Manifold.cylinder(
+      height,
+      radius,
+      radius,
+      parameters.standBaseShape === "octagon"
+        ? 8
+        : QUALITY_SEGMENTS[parameters.quality],
       true,
     );
-    const backing = primitive.transform(
+    if (parameters.standBaseShape === "octagon") {
+      const rotated = base.rotate([0, 0, 22.5]);
+      base.delete();
+      base = rotated;
+    }
+  }
+  return base.translate([0, 0, height / 2]);
+};
+
+const standTextSolid = (
+  wasm: ManifoldToplevel,
+  parameters: BallParameters,
+) => {
+  if (!parameters.standText.trim()) return null;
+  const marking: BallMarking = {
+    id: "stand-label",
+    type: "text",
+    operation: parameters.standTextOperation,
+    text: parameters.standText,
+    logoMask: "",
+    vectorData: parameters.standTextVectorData,
+    logoName: "",
+    font: parameters.standTextFont,
+    size: Math.min(parameters.standTextSize, parameters.standBaseSize * 0.82),
+    height: parameters.standTextDepth,
+    bandIndex: 0,
+    position: 50,
+  };
+  const planar = markingPlanarGeometry(marking);
+  if (!planar) return null;
+  const overlap = 0.32;
+  const depth = parameters.standTextDepth;
+  const totalDepth = depth + overlap;
+  const verticalCenter = parameters.standHeight * 0.43;
+  let text = extrudeContours(
+    wasm,
+    planar.contours,
+    totalDepth,
+    Math.max(0.45, parameters.standBaseSize / 120),
+  );
+
+  if (parameters.standBaseShape === "circle") {
+    const surfaceRadius = parameters.standBaseSize / 2;
+    const centerRadius =
+      parameters.standTextOperation === "raised"
+        ? surfaceRadius + (depth - overlap) / 2
+        : surfaceRadius + (overlap - depth) / 2;
+    const wrapped = text.warp((vertex) => {
+      const localY = vertex[1];
+      const angle = vertex[0] / Math.max(1, surfaceRadius);
+      const radius = centerRadius + vertex[2];
+      vertex[0] = Math.sin(angle) * radius;
+      vertex[1] = -Math.cos(angle) * radius;
+      vertex[2] = verticalCenter + localY;
+    });
+    text.delete();
+    text = wrapped;
+  } else {
+    const frontDistance = parameters.standBaseSize / 2;
+    const outward = new Vector3(0, -1, 0);
+    const surface = new Vector3(0, -frontDistance, verticalCenter);
+    const center = surface.addScaledVector(
+      outward,
+      parameters.standTextOperation === "raised"
+        ? (depth - overlap) / 2
+        : -(depth - overlap) / 2,
+    );
+    const transformed = text.transform(
       matrixElements(
         orientedMatrix(
-          direction,
-          scale(direction, surfaceRadius - backingDepth / 2),
+          [outward.x, outward.y, outward.z],
+          [center.x, center.y, center.z],
         ),
       ),
     );
-    primitive.delete();
-    const merged = result.add(backing);
+    text.delete();
+    text = transformed;
+  }
+  return text;
+};
+
+const generateStandSolid = (
+  wasm: ManifoldToplevel,
+  parameters: BallParameters,
+  registry: MaterialRegistry,
+) => {
+  let result = standBaseSolid(wasm, parameters);
+  result = tagSolid(result, registry, "body");
+
+  const socketRadius =
+    parameters.standBallDiameter / 2 + parameters.standClearance;
+  const cutter = wasm.Manifold.sphere(
+    socketRadius,
+    QUALITY_SEGMENTS[parameters.quality],
+  ).translate([
+    0,
+    0,
+    parameters.standHeight + socketRadius - parameters.standSocketDepth,
+  ]);
+  const socketed = result.subtract(cutter);
+  result.delete();
+  cutter.delete();
+  result = socketed;
+
+  let text = standTextSolid(wasm, parameters);
+  if (text) {
+    text = tagSolid(
+      text,
+      registry,
+      "marking",
+    );
+    const labeled =
+      parameters.standTextOperation === "raised"
+        ? result.add(text)
+        : result.subtract(text);
     result.delete();
-    backing.delete();
-    return applySingleMarking(wasm, merged, marking, surfaceRadius);
-  }, base);
+    text.delete();
+    result = labeled;
+  }
+
+  // The viewport uses Y as its vertical axis. Exporters rotate this model
+  // back to conventional Z-up coordinates for immediate slicing.
+  const upright = result.rotate([-90, 0, 0]);
+  result.delete();
+  return upright;
 };
 
 const applySurfacePattern = (
@@ -2082,11 +2908,108 @@ const readNormals = (
   return normals;
 };
 
+const finalizeGeneratedModel = (
+  input: ManifoldSolid,
+  parameters: BallParameters,
+  registry: MaterialRegistry,
+  startedAt: number,
+  exportUpAxis?: "y",
+): GeneratedBall => {
+  const result = keepLargestPrintableComponent(input);
+  const status = result.status();
+  if (status !== "NoError") {
+    result.delete();
+    throw new Error(`Geometry kernel returned ${status}.`);
+  }
+
+  const mesh = result.getMesh();
+  const positions = readPositions(mesh.vertProperties, mesh.numProp);
+  const indices = new Uint32Array(mesh.triVerts);
+  const meshTriangleMaterials = triangleMaterials(mesh, registry);
+  const shaded = result.calculateNormals(0, 32);
+  const shadedMesh = shaded.getMesh(0);
+  const previewPositions = readPositions(
+    shadedMesh.vertProperties,
+    shadedMesh.numProp,
+  );
+  const previewIndices = new Uint32Array(shadedMesh.triVerts);
+  const previewNormals = readNormals(
+    shadedMesh.vertProperties,
+    shadedMesh.numProp,
+  );
+  const previewMeshTriangleMaterials = triangleMaterials(
+    shadedMesh,
+    registry,
+  );
+  const nonManifoldEdges = countNonManifoldEdges(indices);
+  const triangles = indices.length / 3;
+  const watertight = nonManifoldEdges === 0;
+  const decomposed = result.decompose();
+  const componentVolumes = decomposed
+    .map((component) => component.volume())
+    .filter((volume) => Math.abs(volume) > 1e-6)
+    .sort((left, right) => right - left);
+  const components = componentVolumes.length;
+  decomposed.forEach((component) => component.delete());
+  const warningThickness =
+    parameters.designKind === "stand"
+      ? Math.max(1, Math.min(parameters.standHeight, parameters.standBaseSize) / 4)
+      : parameters.wallThickness;
+  const warningFeature =
+    parameters.designKind === "stand"
+      ? Math.max(0.8, parameters.standTextDepth)
+      : parameters.featureWidth;
+  const stats = {
+    vertices: positions.length / 3,
+    triangles,
+    volume: result.volume(),
+    surfaceArea: result.surfaceArea(),
+    genus: result.genus(),
+    watertight,
+    nonManifoldEdges,
+    components,
+    componentVolumes,
+    buildTimeMs: performance.now() - startedAt,
+    dimensions: meshDimensions(positions),
+    warnings: makeWarnings(warningThickness, warningFeature, {
+      watertight,
+      triangles,
+    }),
+  };
+  shaded.delete();
+  result.delete();
+  return {
+    positions,
+    indices,
+    previewPositions,
+    previewIndices,
+    previewNormals,
+    triangleMaterials: meshTriangleMaterials,
+    previewTriangleMaterials: previewMeshTriangleMaterials,
+    color: parameters.ballColor,
+    detailColor: parameters.detailColor,
+    markingColor: parameters.markingColor,
+    colorMode: parameters.colorMode,
+    exportUpAxis,
+    stats,
+  };
+};
+
 export const generateBall = async (
   parameters: BallParameters,
 ): Promise<GeneratedBall> => {
   const startedAt = performance.now();
   const wasm = await getModule();
+  const materialRegistry = createMaterialRegistry();
+  if (parameters.designKind === "stand") {
+    return finalizeGeneratedModel(
+      generateStandSolid(wasm, parameters, materialRegistry),
+      parameters,
+      materialRegistry,
+      startedAt,
+      "y",
+    );
+  }
   const envelopeRadius = parameters.diameter / 2;
   const raised = parameters.effect === "raised";
   const hasSurfaceRelief =
@@ -2128,12 +3051,14 @@ export const generateBall = async (
       STRUT_SEGMENTS[parameters.quality],
       true,
     );
+    result = tagSolid(result, materialRegistry, "body");
     result = applySeams(
       wasm,
       result,
       parameters,
       latticeRadius,
       envelopeRadius,
+      materialRegistry,
       true,
     );
     result =
@@ -2143,6 +3068,7 @@ export const generateBall = async (
             result,
             parameters,
             envelopeRadius,
+            materialRegistry,
           )
         : applySeamMarking(
             wasm,
@@ -2151,6 +3077,8 @@ export const generateBall = async (
             parameters.seamOperation === "raised"
               ? envelopeRadius
               : envelopeRadius - parameters.seamDepth,
+            envelopeRadius,
+            materialRegistry,
           );
   } else {
     const continuousPolygonPattern =
@@ -2179,6 +3107,7 @@ export const generateBall = async (
         envelopeRadius,
       );
     }
+    result = tagSolid(result, materialRegistry, "body");
     const detailIsBasePattern = footballPattern;
     if (!detailIsBasePattern) {
       result = applySeams(
@@ -2187,11 +3116,18 @@ export const generateBall = async (
         parameters,
         bodyRadius,
         envelopeRadius,
+        materialRegistry,
       );
     }
     result =
       parameters.seamPattern === "none"
-        ? applyMarking(wasm, result, parameters, bodyRadius)
+        ? applyMarking(
+            wasm,
+            result,
+            parameters,
+            envelopeRadius,
+            materialRegistry,
+          )
         : applySeamMarking(
             wasm,
             result,
@@ -2199,66 +3135,24 @@ export const generateBall = async (
             parameters.seamOperation === "raised"
               ? envelopeRadius
               : bodyRadius - parameters.seamDepth,
+            envelopeRadius,
+            materialRegistry,
           );
   }
 
-  result = fitToDiameter(result, parameters.diameter);
-  const status = result.status();
-  if (status !== "NoError") {
-    result.delete();
-    throw new Error(`Geometry kernel returned ${status}.`);
-  }
-
-  const mesh = result.getMesh();
-  const positions = readPositions(mesh.vertProperties, mesh.numProp);
-  const indices = new Uint32Array(mesh.triVerts);
-  const shaded = result.calculateNormals(0, 32);
-  const shadedMesh = shaded.getMesh(0);
-  const previewPositions = readPositions(
-    shadedMesh.vertProperties,
-    shadedMesh.numProp,
+  const fitted = fitBallShape(result, parameters);
+  result = applyKeychain(
+    wasm,
+    fitted.solid,
+    parameters,
+    materialRegistry,
+    fitted.center,
+    fitted.keychainPole,
   );
-  const previewIndices = new Uint32Array(shadedMesh.triVerts);
-  const previewNormals = readNormals(
-    shadedMesh.vertProperties,
-    shadedMesh.numProp,
+  return finalizeGeneratedModel(
+    result,
+    parameters,
+    materialRegistry,
+    startedAt,
   );
-  const nonManifoldEdges = countNonManifoldEdges(indices);
-  const triangles = indices.length / 3;
-  const watertight = nonManifoldEdges === 0;
-  const decomposed = result.decompose();
-  const componentVolumes = decomposed
-    .map((component) => component.volume())
-    .filter((volume) => Math.abs(volume) > 1e-6)
-    .sort((left, right) => right - left);
-  const components = componentVolumes.length;
-  decomposed.forEach((component) => component.delete());
-  const stats = {
-    vertices: positions.length / 3,
-    triangles,
-    volume: result.volume(),
-    surfaceArea: result.surfaceArea(),
-    genus: result.genus(),
-    watertight,
-    nonManifoldEdges,
-    components,
-    componentVolumes,
-    buildTimeMs: performance.now() - startedAt,
-    dimensions: meshDimensions(positions),
-    warnings: makeWarnings(parameters.wallThickness, parameters.featureWidth, {
-      watertight,
-      triangles,
-    }),
-  };
-  shaded.delete();
-  result.delete();
-  return {
-    positions,
-    indices,
-    previewPositions,
-    previewIndices,
-    previewNormals,
-    color: parameters.ballColor,
-    stats,
-  };
 };

@@ -23,7 +23,9 @@ The same source builds native installers for macOS and Windows with Tauri.
 - Balanced Three.js lighting with soft self/contact shadows, orbit, and zoom
 - Named projects stored locally with create, save, open, duplicate, and delete
 - Projects dashboard shown at launch and a dedicated new-design template picker
-- Local prototype account, subscription, and monthly usage screens
+- Local email/password accounts with isolated projects and hashed passwords
+- Explorer, Maker, and Merchant access plans with activation codes
+- Enforced monthly export and saved-project limits with an admin code panel
 - Light, warm-gray, and dark themes plus custom UI and default-model colors
 - Per-project model color retained by 3MF export
 - Manifold mesh validation and physical dimensions

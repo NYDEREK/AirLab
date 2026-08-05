@@ -7,6 +7,7 @@ import {
   Hexagon,
   HeartPulse,
   Orbit,
+  PackageOpen,
   Sparkles,
 } from "lucide-react";
 import {
@@ -22,9 +23,11 @@ const TEMPLATE_ICONS = {
   basketball: Disc3,
   volleyball: Disc3,
   baseball: CircleDot,
+  rugby: Orbit,
   golf: CircleDot,
   massage: HeartPulse,
   "pet-toy": Bone,
+  stand: PackageOpen,
 } as const;
 
 interface TemplatePickerProps {

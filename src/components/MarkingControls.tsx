@@ -1,8 +1,10 @@
 import { Image as ImageIcon, Plus, Trash2, Type, Upload } from "lucide-react";
 import { useEffect, useState } from "react";
 import { rasterizeLogo } from "../geometry/logoMask";
+import { vectorizeSvg, vectorizeText } from "../geometry/markingVector";
 import type {
   BallMarking,
+  MarkingFont,
   BallParameters,
   MarkingOperation,
 } from "../geometry/types";
@@ -44,11 +46,18 @@ const createMarking = (type: BallMarking["type"]): BallMarking => ({
   operation: "engraved",
   text: "AIRLAB",
   logoMask: "",
+  vectorData: "",
   logoName: "",
+  font: "modern",
+  placement: "surface",
   size: 28,
   height: 0.8,
   bandIndex: 0,
-  position: 50,
+  position: 62,
+  latitude: 20,
+  rotation: 0,
+  framePadding: 3,
+  frameHeight: 0.9,
 });
 
 export function MarkingControls({
@@ -72,6 +81,42 @@ export function MarkingControls({
     setSelectedId(markings[0].id);
   }, [markings, selected]);
 
+  useEffect(() => {
+    if (!selected || selected.type !== "text") return;
+    let cancelled = false;
+    const expectedId = selected.id;
+    const expectedText = selected.text;
+    const expectedFont = selected.font ?? "modern";
+    vectorizeText(expectedText, expectedFont)
+      .then((vectorData) => {
+        if (cancelled || vectorData === selected.vectorData) return;
+        onUpdate(
+          "markings",
+          markings.map((marking) =>
+            marking.id === expectedId &&
+            marking.text === expectedText &&
+            (marking.font ?? "modern") === expectedFont
+              ? { ...marking, vectorData }
+              : marking,
+          ),
+        );
+      })
+      .catch(() => {
+        // The generator retains a printable compatibility font as a fallback.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    markings,
+    onUpdate,
+    selected?.font,
+    selected?.id,
+    selected?.text,
+    selected?.type,
+    selected?.vectorData,
+  ]);
+
   const replaceMarking = (
     id: string,
     changes: Partial<BallMarking>,
@@ -89,7 +134,14 @@ export function MarkingControls({
       onNotice(`A design can contain up to ${MAX_MARKINGS} markings.`);
       return;
     }
-    const marking = createMarking(type);
+    const placement =
+      parameters.seamPattern === "none" ? "surface" : "band";
+    const marking = {
+      ...createMarking(type),
+      placement,
+      position: placement === "surface" ? 62 : 50,
+      latitude: placement === "surface" ? 20 : 0,
+    } satisfies BallMarking;
     onUpdate("markings", [...markings, marking]);
     setSelectedId(marking.id);
   };
@@ -173,6 +225,8 @@ export function MarkingControls({
                   <small>
                     {parameters.seamPattern === "none"
                       ? `${marking.position}% around ball`
+                      : marking.placement === "surface"
+                        ? `Surface · ${marking.position}%`
                       : `${
                           availableBandLabels[
                             Math.min(
@@ -223,6 +277,7 @@ export function MarkingControls({
                 onChange={(event) =>
                   replaceMarking(selected.id, {
                     text: event.target.value,
+                    vectorData: "",
                   })
                 }
                 placeholder="AIRLAB"
@@ -242,9 +297,18 @@ export function MarkingControls({
                   const file = event.target.files?.[0];
                   if (!file) return;
                   try {
-                    const result = await rasterizeLogo(file);
+                    const isSvg =
+                      file.type === "image/svg+xml" ||
+                      file.name.toLowerCase().endsWith(".svg");
+                    const vectorData = isSvg
+                      ? await vectorizeSvg(file)
+                      : "";
+                    const result = isSvg
+                      ? { mask: "", name: file.name }
+                      : await rasterizeLogo(file);
                     replaceMarking(selected.id, {
                       logoMask: result.mask,
+                      vectorData,
                       logoName: result.name,
                     });
                     onNotice(
@@ -262,18 +326,61 @@ export function MarkingControls({
           )}
 
           <div className="marking-parameters">
+            {selected.type === "text" ? (
+              <>
+                <span className="mini-label">Font</span>
+                <SegmentedControl
+                  columns={3}
+                  onChange={(font: MarkingFont) =>
+                    replaceMarking(selected.id, {
+                      font,
+                      vectorData: "",
+                    })
+                  }
+                  options={[
+                    { value: "modern", label: "Modern" },
+                    { value: "rounded", label: "Rounded" },
+                    { value: "technical", label: "Technical" },
+                  ]}
+                  value={selected.font ?? "modern"}
+                />
+              </>
+            ) : null}
+            {parameters.seamPattern !== "none" ? (
+              <>
+                <span className="mini-label">Placement</span>
+                <SegmentedControl
+                  onChange={(placement: BallMarking["placement"]) =>
+                    replaceMarking(selected.id, {
+                      placement,
+                      ...(placement === "surface" &&
+                      selected.position === 50 &&
+                      (selected.latitude ?? 0) === 0
+                        ? { position: 62, latitude: 20 }
+                        : {}),
+                    })
+                  }
+                  options={[
+                    { value: "band", label: "On band" },
+                    { value: "surface", label: "Surface frame" },
+                  ]}
+                  value={selected.placement ?? "band"}
+                />
+              </>
+            ) : null}
             <span className="mini-label">Operation</span>
             <SegmentedControl
               onChange={(operation: MarkingOperation) =>
                 replaceMarking(selected.id, { operation })
               }
               options={[
-                { value: "raised", label: "Additive" },
-                { value: "engraved", label: "Negative" },
+                { value: "raised", label: "Raised" },
+                { value: "engraved", label: "Inset" },
               ]}
               value={selected.operation}
             />
             {parameters.seamPattern !== "none" &&
+            (selected.placement ?? "band") === "band" &&
             availableBands > 1 ? (
               <div className="marking-band-picker">
                 <span className="mini-label">Band</span>
@@ -299,13 +406,15 @@ export function MarkingControls({
             ) : null}
             <RangeField
               hint={
-                parameters.seamPattern === "none"
+                parameters.seamPattern === "none" ||
+                selected.placement === "surface"
                   ? "around ball"
                   : "along selected band"
               }
               label={
-                parameters.seamPattern === "none"
-                  ? "Surface position"
+                parameters.seamPattern === "none" ||
+                selected.placement === "surface"
+                  ? "Longitude"
                   : "Position on band"
               }
               max={100}
@@ -317,8 +426,59 @@ export function MarkingControls({
               unit="%"
               value={selected.position}
             />
+            {selected.placement === "surface" ||
+            parameters.seamPattern === "none" ? (
+              <>
+                <RangeField
+                  label="Latitude"
+                  max={75}
+                  min={-75}
+                  onChange={(latitude) =>
+                    replaceMarking(selected.id, { latitude })
+                  }
+                  step={1}
+                  unit="°"
+                  value={selected.latitude ?? 0}
+                />
+                <RangeField
+                  label="Rotation"
+                  max={180}
+                  min={-180}
+                  onChange={(rotation) =>
+                    replaceMarking(selected.id, { rotation })
+                  }
+                  step={1}
+                  unit="°"
+                  value={selected.rotation ?? 0}
+                />
+                <RangeField
+                  hint="extra space around text or logo"
+                  label="Frame size"
+                  max={20}
+                  min={1}
+                  onChange={(framePadding) =>
+                    replaceMarking(selected.id, { framePadding })
+                  }
+                  step={0.5}
+                  unit="mm"
+                  value={selected.framePadding ?? 3}
+                />
+                <RangeField
+                  hint="above the ball surface"
+                  label="Frame height"
+                  max={4}
+                  min={0}
+                  onChange={(frameHeight) =>
+                    replaceMarking(selected.id, { frameHeight })
+                  }
+                  step={0.1}
+                  unit="mm"
+                  value={selected.frameHeight ?? 0.9}
+                />
+              </>
+            ) : null}
             <RangeField
-              label="Mark size"
+              label={selected.type === "text" ? "Text size" : "Logo size"}
               max={60}
               min={5}
               onChange={(size) =>

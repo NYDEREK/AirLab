@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -23,17 +24,28 @@ import {
   UserRound,
 } from "lucide-react";
 import {
+  activatePlanLocally,
+  hasWorkspaceAccess,
   loadAccount,
   loadUsage,
   recordExport,
   recordGeneration,
+  registerLocally,
   signInLocally,
   signOutLocally,
   type AccountSession,
   type UsageState,
 } from "./account/store";
+import { planById } from "./account/plans";
+import {
+  AccessPortal,
+  type AuthMode,
+} from "./components/AccessPortal";
 import { AuthDialog } from "./components/AuthDialog";
-import { BallViewport } from "./components/BallViewport";
+import {
+  BallViewport,
+  type BallViewportHandle,
+} from "./components/BallViewport";
 import { BrandLogo } from "./components/BrandLogo";
 import { RangeField, SegmentedControl } from "./components/Controls";
 import {
@@ -44,7 +56,11 @@ import { HelpTooltip } from "./components/HelpTooltip";
 import { MarkingControls } from "./components/MarkingControls";
 import { ProjectDashboard } from "./components/ProjectDashboard";
 import { SaveProjectDialog } from "./components/SaveProjectDialog";
-import { SettingsPanel } from "./components/SettingsPanel";
+import {
+  SettingsPanel,
+  type SettingsTab,
+} from "./components/SettingsPanel";
+import { StandControls } from "./components/StandControls";
 import { TemplatePicker } from "./components/TemplatePicker";
 import { saveGeneratedBall, type ExportFormat } from "./geometry/exporters";
 import {
@@ -52,6 +68,7 @@ import {
   type BallMode,
   type BallParameters,
   type BallPattern,
+  type ColorMode,
   type MeshQuality,
   type SeamProfile,
   type SeamPattern,
@@ -82,6 +99,11 @@ const MODE_OPTIONS: Array<{ value: BallMode; label: string }> = [
   { value: "lattice", label: "Airless lattice" },
 ];
 
+const COLOR_MODE_OPTIONS: Array<{ value: ColorMode; label: string }> = [
+  { value: "single", label: "One color" },
+  { value: "multi", label: "Multicolor" },
+];
+
 const SEAM_OPTIONS: Array<{ value: SeamPattern; label: string }> = [
   { value: "none", label: "None" },
   { value: "custom", label: "Custom" },
@@ -90,6 +112,7 @@ const SEAM_OPTIONS: Array<{ value: SeamPattern; label: string }> = [
   { value: "basketball", label: "Basketball" },
   { value: "volleyball", label: "Volleyball" },
   { value: "baseball", label: "Baseball" },
+  { value: "rugby", label: "Rugby" },
 ];
 
 const formatNumber = (value: number, digits = 1) =>
@@ -118,6 +141,7 @@ const accentTextColor = (hex: string) => {
 };
 
 function App() {
+  const viewportRef = useRef<BallViewportHandle>(null);
   const [view, setView] = useState<AppView>("projects");
   const [parameters, setParameters] = useState<BallParameters>({
     ...DEFAULT_PARAMETERS,
@@ -128,8 +152,11 @@ function App() {
   );
   const [exporting, setExporting] = useState<ExportFormat | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [account, setAccount] = useState<AccountSession | null>(() =>
+    loadAccount(),
+  );
   const [projects, setProjects] = useState<SavedProject[]>(() =>
-    loadProjects(),
+    loadProjects(loadAccount()?.id),
   );
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
   const [projectName, setProjectName] = useState("Untitled ball");
@@ -137,17 +164,31 @@ function App() {
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showAuth, setShowAuth] = useState(false);
+  const [authMode, setAuthMode] = useState<AuthMode>("signin");
+  const [settingsInitialTab, setSettingsInitialTab] =
+    useState<SettingsTab>("appearance");
   const [appearance, setAppearance] = useState<AppearanceSettings>(() =>
     loadAppearance(),
   );
-  const [account, setAccount] = useState<AccountSession | null>(() =>
-    loadAccount(),
+  const [usage, setUsage] = useState<UsageState>(() =>
+    loadUsage(loadAccount()?.id),
   );
-  const [usage, setUsage] = useState<UsageState>(() => loadUsage());
   const lastCountedBall = useRef<typeof ball>(null);
 
   const dirty =
     lastSavedHash === null || lastSavedHash !== parametersHash(parameters);
+  const workspaceAccess = hasWorkspaceAccess(account);
+  const activePlan = account ? planById(account.plan) : null;
+  const projectLimit = account?.isAdmin
+    ? null
+    : (activePlan?.projectLimit ?? 0);
+  const exportLimit = account?.isAdmin
+    ? null
+    : (activePlan?.exportLimit ?? 0);
+  const projectLimitReached =
+    projectLimit !== null && projects.length >= projectLimit;
+  const exportLimitReached =
+    exportLimit !== null && usage.exports >= exportLimit;
 
   const themeStyle = {
     "--interface": appearance.interfaceColor,
@@ -168,17 +209,27 @@ function App() {
   }, [notice]);
 
   useEffect(() => {
-    if (!ball || ball === lastCountedBall.current) return;
+    if (
+      !ball ||
+      !account ||
+      !workspaceAccess ||
+      ball === lastCountedBall.current
+    ) {
+      return;
+    }
     lastCountedBall.current = ball;
-    setUsage(recordGeneration());
-  }, [ball]);
+    setUsage(recordGeneration(account.id));
+  }, [account, ball, workspaceAccess]);
 
-  const update = <Key extends keyof BallParameters>(
-    key: Key,
-    value: BallParameters[Key],
-  ) => {
-    setParameters((current) => ({ ...current, [key]: value }));
-  };
+  const update = useCallback(
+    <Key extends keyof BallParameters>(
+      key: Key,
+      value: BallParameters[Key],
+    ) => {
+      setParameters((current) => ({ ...current, [key]: value }));
+    },
+    [],
+  );
 
   const setMode = (mode: BallMode) => {
     setParameters((current) => ({
@@ -226,11 +277,80 @@ function App() {
     }));
   };
 
+  const openAuth = (mode: AuthMode) => {
+    setAuthMode(mode);
+    setShowAuth(true);
+  };
+
+  const authenticate = async (
+    mode: AuthMode,
+    email: string,
+    password: string,
+  ) => {
+    const session =
+      mode === "register"
+        ? await registerLocally(email, password)
+        : await signInLocally(email, password);
+    setAccount(session);
+    setProjects(loadProjects(session.id));
+    setUsage(loadUsage(session.id));
+    setShowAuth(false);
+    setNotice(
+      mode === "register"
+        ? "Account created. Enter your access code to continue."
+        : `Welcome back, ${session.name}.`,
+    );
+    return session;
+  };
+
+  const signOut = () => {
+    signOutLocally();
+    setAccount(null);
+    setProjects([]);
+    setUsage(loadUsage());
+    setView("projects");
+    setShowSettings(false);
+    setNotice("Signed out.");
+  };
+
+  const activatePlan = (code: string) => {
+    if (!account) {
+      openAuth("signin");
+      return;
+    }
+    try {
+      const updated = activatePlanLocally(account, code);
+      setAccount(updated);
+      setUsage(loadUsage(updated.id));
+      const definition = planById(updated.plan);
+      setNotice(
+        definition
+          ? `${definition.name} access activated.`
+          : "AirLab access activated.",
+      );
+    } catch (activationError) {
+      setNotice(
+        activationError instanceof Error
+          ? activationError.message
+          : String(activationError),
+      );
+    }
+  };
+
+  const openSettings = (tab: SettingsTab = "appearance") => {
+    setSettingsInitialTab(tab);
+    setShowSettings(true);
+  };
+
   const selectTemplate = (template: BallTemplateDefinition) => {
     const next = parametersForTemplate(template, appearance.defaultBallColor);
     setParameters(next);
     setCurrentProjectId(null);
-    setProjectName(`Untitled ${template.name.toLowerCase()} ball`);
+    setProjectName(
+      template.id === "stand"
+        ? "Untitled ball stand"
+        : `Untitled ${template.name.toLowerCase()} ball`,
+    );
     setLastSavedHash(null);
     setView("editor");
     setNotice(`${template.name} template opened.`);
@@ -246,11 +366,23 @@ function App() {
   };
 
   const saveProject = (name = projectName) => {
+    if (!account) return;
+    if (!currentProjectId && projectLimitReached) {
+      setShowSaveDialog(false);
+      setNotice(
+        `${activePlan?.name ?? "Your"} plan allows ${projectLimit} saved ${
+          projectLimit === 1 ? "project" : "projects"
+        }.`,
+      );
+      return;
+    }
     const result = upsertProject(
+      account.id,
       projects,
       name,
       parameters,
       currentProjectId,
+      viewportRef.current?.captureThumbnail() ?? null,
     );
     setProjects(result.projects);
     setCurrentProjectId(result.project.id);
@@ -262,20 +394,37 @@ function App() {
 
   const requestSave = () => {
     if (currentProjectId) saveProject();
-    else setShowSaveDialog(true);
+    else if (projectLimitReached) {
+      setNotice(
+        `${activePlan?.name ?? "Your"} plan has reached its saved-project limit.`,
+      );
+    } else {
+      setShowSaveDialog(true);
+    }
   };
 
   const duplicateProject = (project: SavedProject) => {
+    if (!account) return;
+    if (projectLimitReached) {
+      setNotice(
+        `${activePlan?.name ?? "Your"} plan has reached its saved-project limit.`,
+      );
+      return;
+    }
     const result = upsertProject(
+      account.id,
       projects,
       `${project.name} copy`,
       project.parameters,
+      null,
+      project.thumbnail,
     );
     setProjects(result.projects);
     setNotice(`Created “${result.project.name}”.`);
   };
 
   const deleteProject = (id: string) => {
+    if (!account) return;
     const project = projects.find((candidate) => candidate.id === id);
     if (
       project &&
@@ -283,7 +432,7 @@ function App() {
     ) {
       return;
     }
-    setProjects((current) => removeProject(current, id));
+    setProjects((current) => removeProject(account.id, current, id));
     if (id === currentProjectId) {
       setCurrentProjectId(null);
       setLastSavedHash(null);
@@ -292,13 +441,23 @@ function App() {
   };
 
   const exportBall = async (format: ExportFormat) => {
-    if (!ball || state !== "ready") return;
+    if (!ball || state !== "ready" || !account) return;
+    if (exportLimitReached) {
+      setNotice(
+        `${activePlan?.name ?? "Your"} plan has reached its monthly export limit.`,
+      );
+      return;
+    }
     setExporting(format);
     setNotice(null);
     try {
-      const saved = await saveGeneratedBall(ball, format);
+      const saved = await saveGeneratedBall(
+        ball,
+        format,
+        parameters.designKind === "stand" ? "stand" : "ball",
+      );
       if (saved) {
-        setUsage(recordExport());
+        setUsage(recordExport(account.id));
         setNotice(`${format.toUpperCase()} exported successfully.`);
       }
     } catch (saveError) {
@@ -379,10 +538,31 @@ function App() {
           : "Feature width";
   const template = templateById(parameters.template);
 
+  if (!workspaceAccess) {
+    return (
+      <div className="app-shell access-shell" style={themeStyle}>
+        <AccessPortal
+          account={account}
+          onActivate={activatePlan}
+          onOpenAuth={openAuth}
+          onSignOut={signOut}
+        />
+        {showAuth ? (
+          <AuthDialog
+            initialMode={authMode}
+            onClose={() => setShowAuth(false)}
+            onSubmit={authenticate}
+          />
+        ) : null}
+        {notice ? <div className="toast">{notice}</div> : null}
+      </div>
+    );
+  }
+
   const accountButton = (
     <button
       className="account-button"
-      onClick={() => (account ? setShowSettings(true) : setShowAuth(true))}
+      onClick={() => (account ? openSettings("account") : openAuth("signin"))}
       type="button"
     >
       {account ? (
@@ -413,12 +593,18 @@ function App() {
           >
             Design new
           </button>
+          <button
+            onClick={() => openSettings("subscription")}
+            type="button"
+          >
+            Available plans
+          </button>
         </nav>
         <div>
           <button
             aria-label="Open settings"
             className="icon-action"
-            onClick={() => setShowSettings(true)}
+            onClick={() => openSettings()}
             title="Settings"
             type="button"
           >
@@ -474,7 +660,7 @@ function App() {
               </button>
               <button
                 aria-label="Open settings"
-                onClick={() => setShowSettings(true)}
+                onClick={() => openSettings()}
                 title="Settings"
                 type="button"
               >
@@ -517,25 +703,84 @@ function App() {
             <aside className="control-panel">
               <section className="panel-section model-color-section">
                 <div className="section-label">
-                  <span>Model color</span>
+                  <span>Model colors</span>
                 </div>
-                <label>
-                  <input
-                    aria-label="Ball color"
-                    onChange={(event) =>
-                      update("ballColor", event.target.value)
-                    }
-                    type="color"
-                    value={parameters.ballColor}
-                  />
-                  <span>
-                    <strong>Preview & 3MF color</strong>
-                    <small>{parameters.ballColor.toUpperCase()}</small>
-                  </span>
-                </label>
-                <p>STL stores geometry only; 3MF also keeps this color.</p>
+                <SegmentedControl
+                  onChange={(colorMode) => update("colorMode", colorMode)}
+                  options={COLOR_MODE_OPTIONS}
+                  value={parameters.colorMode}
+                />
+                <div
+                  className={`model-color-grid ${
+                    parameters.designKind === "stand" ? "stand-colors" : ""
+                  } ${parameters.colorMode === "single" ? "single-color" : ""}`}
+                >
+                  <label>
+                    <input
+                      aria-label="Ball color"
+                      onChange={(event) =>
+                        update("ballColor", event.target.value)
+                      }
+                      type="color"
+                      value={parameters.ballColor}
+                    />
+                    <span>
+                      <strong>
+                        {parameters.designKind === "stand" ? "Stand" : "Ball"}
+                      </strong>
+                      <small>{parameters.ballColor.toUpperCase()}</small>
+                    </span>
+                  </label>
+                  {parameters.designKind === "ball" &&
+                  parameters.colorMode === "multi" ? (
+                    <label>
+                      <input
+                        aria-label="Bands and frame color"
+                        onChange={(event) =>
+                          update("detailColor", event.target.value)
+                        }
+                        type="color"
+                        value={parameters.detailColor}
+                      />
+                      <span>
+                        <strong>Bands</strong>
+                        <small>{parameters.detailColor.toUpperCase()}</small>
+                      </span>
+                    </label>
+                  ) : null}
+                  {parameters.colorMode === "multi" ? (
+                    <label>
+                      <input
+                        aria-label="Text and logo color"
+                        onChange={(event) =>
+                          update("markingColor", event.target.value)
+                        }
+                        type="color"
+                        value={parameters.markingColor}
+                      />
+                      <span>
+                        <strong>
+                          {parameters.designKind === "stand"
+                            ? "Text"
+                            : "Text/logo"}
+                        </strong>
+                        <small>{parameters.markingColor.toUpperCase()}</small>
+                      </span>
+                    </label>
+                  ) : null}
+                </div>
+                <p>
+                  {parameters.colorMode === "single"
+                    ? "One material for straightforward TPU printing."
+                    : "3MF keeps separate ball, band and marking colors."}
+                  {" STL stores geometry only."}
+                </p>
               </section>
 
+              {parameters.designKind === "stand" ? (
+                <StandControls parameters={parameters} onUpdate={update} />
+              ) : (
+                <>
               <div className="control-group-heading">
                 <strong>Ball</strong>
                 <span>Structure, pattern & dimensions</span>
@@ -626,7 +871,7 @@ function App() {
                   <span>Dimensions</span>
                 </div>
                 <RangeField
-                  label="Diameter"
+                  label={parameters.shape === "rugby" ? "Length" : "Diameter"}
                   max={240}
                   min={20}
                   onChange={(value) => update("diameter", value)}
@@ -634,6 +879,26 @@ function App() {
                   unit="mm"
                   value={parameters.diameter}
                 />
+                {parameters.shape === "rugby" ? (
+                  <RangeField
+                    displayValue={`1:${formatNumber(
+                      parameters.rugbyAspectRatio,
+                      2,
+                    )}`}
+                    hint={`≈ ${formatNumber(
+                      parameters.diameter / parameters.rugbyAspectRatio,
+                      1,
+                    )} mm wide`}
+                    label="Length ratio"
+                    max={1.8}
+                    min={1.2}
+                    onChange={(value) =>
+                      update("rugbyAspectRatio", value)
+                    }
+                    step={0.01}
+                    value={parameters.rugbyAspectRatio}
+                  />
+                ) : null}
                 {(parameters.mode === "shell" ||
                   parameters.mode === "perforated") && (
                   <RangeField
@@ -712,6 +977,111 @@ function App() {
                     step={1}
                     value={parameters.density}
                   />
+                ) : null}
+              </section>
+
+              <section className="panel-section parameter-stack">
+                <div className="section-label">
+                  <span>Keychain</span>
+                  <HelpTooltip label="Keychain loop">
+                    <p>
+                      Adds a printable loop directly to the outside of the
+                      finished model. The ball size itself stays unchanged.
+                    </p>
+                    <p>
+                      Surface offset sinks the loop into the ball or moves it
+                      outward. Rotation turns its plane around the attachment
+                      axis, while profile roundness changes the loop from a
+                      square to a circular cross-section.
+                    </p>
+                  </HelpTooltip>
+                </div>
+                <SegmentedControl
+                  onChange={(value) =>
+                    update("keychainEnabled", value === "on")
+                  }
+                  options={[
+                    { value: "off", label: "Off" },
+                    { value: "on", label: "Add loop" },
+                  ]}
+                  value={parameters.keychainEnabled ? "on" : "off"}
+                />
+                {parameters.keychainEnabled ? (
+                  <div className="sub-control keychain-controls">
+                    <RangeField
+                      label="Loop diameter"
+                      max={24}
+                      min={6}
+                      onChange={(value) =>
+                        update("keychainOuterDiameter", value)
+                      }
+                      step={0.5}
+                      unit="mm"
+                      value={parameters.keychainOuterDiameter}
+                    />
+                    <RangeField
+                      label="Hole diameter"
+                      max={Math.max(
+                        3,
+                        parameters.keychainOuterDiameter - 2,
+                      )}
+                      min={2.5}
+                      onChange={(value) =>
+                        update("keychainHoleDiameter", value)
+                      }
+                      step={0.5}
+                      unit="mm"
+                      value={Math.min(
+                        parameters.keychainHoleDiameter,
+                        parameters.keychainOuterDiameter - 2,
+                      )}
+                    />
+                    <RangeField
+                      hint="negative sinks it into the ball"
+                      label="Surface offset"
+                      max={Math.max(
+                        0.2,
+                        ((parameters.keychainOuterDiameter -
+                          parameters.keychainHoleDiameter) /
+                          2) *
+                          0.32,
+                      )}
+                      min={-Math.min(
+                        8,
+                        parameters.keychainOuterDiameter * 0.55,
+                      )}
+                      onChange={(value) =>
+                        update("keychainSurfaceOffset", value)
+                      }
+                      step={0.1}
+                      unit="mm"
+                      value={parameters.keychainSurfaceOffset}
+                    />
+                    <RangeField
+                      hint="square to circular cross-section"
+                      label="Profile roundness"
+                      max={100}
+                      min={0}
+                      onChange={(value) =>
+                        update("keychainRoundness", value)
+                      }
+                      step={1}
+                      unit="%"
+                      value={parameters.keychainRoundness}
+                    />
+                    <RangeField
+                      hint="around the attachment axis"
+                      label="Loop rotation"
+                      max={180}
+                      min={-180}
+                      onChange={(value) =>
+                        update("keychainRotation", value)
+                      }
+                      step={1}
+                      unit="°"
+                      value={parameters.keychainRotation}
+                    />
+                  </div>
                 ) : null}
               </section>
 
@@ -796,6 +1166,31 @@ function App() {
                         unit="mm"
                         value={parameters.seamWidth}
                       />
+                      {parameters.seamPattern === "baseball" ? (
+                        <>
+                          <RangeField
+                            label="Stitch density"
+                            max={96}
+                            min={18}
+                            onChange={(value) =>
+                              update("baseballStitchDensity", value)
+                            }
+                            step={1}
+                            value={parameters.baseballStitchDensity}
+                          />
+                          <RangeField
+                            label="Stitch thickness"
+                            max={2}
+                            min={0.3}
+                            onChange={(value) =>
+                              update("baseballStitchThickness", value)
+                            }
+                            step={0.1}
+                            unit="mm"
+                            value={parameters.baseballStitchThickness}
+                          />
+                        </>
+                      ) : null}
                       {parameters.seamPattern === "tennis" ||
                       parameters.seamPattern === "basketball" ? (
                         <RangeField
@@ -833,6 +1228,8 @@ function App() {
                 onUpdate={update}
                 parameters={parameters}
               />
+                </>
+              )}
 
               <section className="panel-section">
                 <div className="section-label">
@@ -853,14 +1250,26 @@ function App() {
             </aside>
 
             <section className="stage">
-              <BallViewport accentColor={parameters.ballColor} ball={ball} />
+              <BallViewport
+                accentColor={parameters.ballColor}
+                ball={ball}
+                ref={viewportRef}
+              />
               <div className="stage-heading">
                 <span>{template.name}</span>
                 <strong>
-                  {MODE_OPTIONS.find(
-                    (option) => option.value === parameters.mode,
-                  )?.label}{" "}
-                  · {parameters.diameter} mm
+                  {parameters.designKind === "stand" ? (
+                    <>
+                      {parameters.standBaseShape} stand · {parameters.standBaseSize} mm
+                    </>
+                  ) : (
+                    <>
+                      {MODE_OPTIONS.find(
+                        (option) => option.value === parameters.mode,
+                      )?.label}{" "}
+                      · {parameters.diameter} mm
+                    </>
+                  )}
                 </strong>
               </div>
               <div className="viewport-help">
@@ -896,8 +1305,19 @@ function App() {
                   <strong>{template.name}</strong>
                 </div>
                 <div className="metric-row">
-                  <span>Diameter</span>
-                  <strong>{parameters.diameter} mm</strong>
+                  <span>
+                    {parameters.designKind === "stand"
+                      ? "Base size"
+                      : parameters.shape === "rugby"
+                        ? "Length"
+                        : "Diameter"}
+                  </span>
+                  <strong>
+                    {parameters.designKind === "stand"
+                      ? parameters.standBaseSize
+                      : parameters.diameter}{" "}
+                    mm
+                  </strong>
                 </div>
                 <div className="metric-row">
                   <span>Bounding size</span>
@@ -909,14 +1329,28 @@ function App() {
                       : "—"}
                   </strong>
                 </div>
-                {(parameters.mode === "shell" ||
+                {parameters.designKind === "stand" ? (
+                  <>
+                    <div className="metric-row">
+                      <span>Ball diameter</span>
+                      <strong>{parameters.standBallDiameter} mm</strong>
+                    </div>
+                    <div className="metric-row">
+                      <span>Socket depth</span>
+                      <strong>{parameters.standSocketDepth} mm</strong>
+                    </div>
+                  </>
+                ) : null}
+                {parameters.designKind === "ball" &&
+                (parameters.mode === "shell" ||
                   parameters.mode === "perforated") && (
                   <div className="metric-row">
                     <span>Wall thickness</span>
                     <strong>{parameters.wallThickness} mm</strong>
                   </div>
                 )}
-                {parameters.seamPattern !== "none" ? (
+                {parameters.designKind === "ball" &&
+                parameters.seamPattern !== "none" ? (
                   <div className="metric-row">
                     <span>Seams</span>
                     <strong>{parameters.seamPattern}</strong>
@@ -951,8 +1385,9 @@ function App() {
                 <div>
                   <strong>{parameters.quality} geometry</strong>
                   <span>
-                    Sport seams and branding are included in the closed export
-                    mesh.
+                    {parameters.designKind === "stand"
+                      ? "The spherical socket and front label are included in the closed export mesh."
+                      : "Sport seams and branding are included in the closed export mesh."}
                   </span>
                 </div>
               </section>
@@ -973,17 +1408,15 @@ function App() {
         <SettingsPanel
           account={account}
           appearance={appearance}
+          initialTab={settingsInitialTab}
+          onActivate={activatePlan}
           onAppearanceChange={setAppearance}
           onClose={() => setShowSettings(false)}
           onSignIn={() => {
             setShowSettings(false);
-            setShowAuth(true);
+            openAuth("signin");
           }}
-          onSignOut={() => {
-            signOutLocally();
-            setAccount(null);
-            setNotice("Signed out.");
-          }}
+          onSignOut={signOut}
           projectCount={projects.length}
           usage={usage}
         />
@@ -991,14 +1424,9 @@ function App() {
 
       {showAuth && (
         <AuthDialog
+          initialMode={authMode}
           onClose={() => setShowAuth(false)}
-          onSubmit={(name, email) => {
-            const session = signInLocally(name, email);
-            setAccount(session);
-            setShowAuth(false);
-            setNotice(`Welcome, ${session.name}.`);
-            return session;
-          }}
+          onSubmit={authenticate}
         />
       )}
 
