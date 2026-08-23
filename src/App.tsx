@@ -36,7 +36,7 @@ import {
   type AccountSession,
   type UsageState,
 } from "./account/store";
-import { planById } from "./account/plans";
+import { planById, planUsageLimit } from "./account/plans";
 import {
   AccessPortal,
   type AuthMode,
@@ -179,12 +179,16 @@ function App() {
     lastSavedHash === null || lastSavedHash !== parametersHash(parameters);
   const workspaceAccess = hasWorkspaceAccess(account);
   const activePlan = account ? planById(account.plan) : null;
-  const projectLimit = account?.isAdmin
-    ? null
-    : (activePlan?.projectLimit ?? 0);
-  const exportLimit = account?.isAdmin
-    ? null
-    : (activePlan?.exportLimit ?? 0);
+  const projectLimit = planUsageLimit(
+    account?.plan,
+    "projects",
+    account?.isAdmin,
+  );
+  const exportLimit = planUsageLimit(
+    account?.plan,
+    "exports",
+    account?.isAdmin,
+  );
   const projectLimitReached =
     projectLimit !== null && projects.length >= projectLimit;
   const exportLimitReached =

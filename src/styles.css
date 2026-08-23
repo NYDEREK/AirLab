@@ -521,13 +521,7 @@ button:disabled {
   position: relative;
   min-width: 0;
   overflow: hidden;
-  background:
-    radial-gradient(
-      circle at 50% 46%,
-      color-mix(in srgb, white 72%, transparent),
-      transparent 51%
-    ),
-    var(--stage);
+  background: var(--stage);
 }
 
 .stage::before {
