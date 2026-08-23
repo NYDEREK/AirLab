@@ -10,7 +10,11 @@ import {
   X,
 } from "lucide-react";
 import { useState } from "react";
-import { PLAN_DEFINITIONS, planById } from "../account/plans";
+import {
+  PLAN_DEFINITIONS,
+  planById,
+  planUsageLimit,
+} from "../account/plans";
 import {
   PLAN_ACCESS_CODES,
   type AccountSession,
@@ -253,12 +257,20 @@ export function SettingsPanel({
               <div className="usage-list">
                 <UsageBar
                   label="Exports"
-                  limit={account?.isAdmin ? null : (plan?.exportLimit ?? 0)}
+                  limit={planUsageLimit(
+                    account?.plan,
+                    "exports",
+                    account?.isAdmin,
+                  )}
                   value={usage.exports}
                 />
                 <UsageBar
                   label="Saved projects"
-                  limit={account?.isAdmin ? null : (plan?.projectLimit ?? 0)}
+                  limit={planUsageLimit(
+                    account?.plan,
+                    "projects",
+                    account?.isAdmin,
+                  )}
                   value={projectCount}
                 />
               </div>

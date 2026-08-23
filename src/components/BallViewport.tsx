@@ -65,7 +65,7 @@ function BallViewport({ ball, accentColor }, ref) {
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.outputColorSpace = SRGBColorSpace;
     renderer.toneMapping = ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.05;
+    renderer.toneMappingExposure = 0.98;
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = PCFShadowMap;
     renderer.setClearColor(new Color("#ffffff"), 0);
@@ -80,13 +80,13 @@ function BallViewport({ ball, accentColor }, ref) {
     controls.maxDistance = 600;
     controlsRef.current = controls;
 
-    scene.add(new AmbientLight("#ffffff", 0.68));
-    scene.add(new HemisphereLight("#ffffff", "#c9d0c6", 0.9));
-    const key = new DirectionalLight("#ffffff", 1.55);
+    scene.add(new AmbientLight("#ffffff", 0.3));
+    scene.add(new HemisphereLight("#f7f8f5", "#8d958b", 0.7));
+    const key = new DirectionalLight("#fffdf8", 1.42);
     key.position.set(65, 90, 75);
     key.castShadow = true;
     key.shadow.mapSize.set(2048, 2048);
-    key.shadow.radius = 5;
+    key.shadow.radius = 4;
     key.shadow.bias = -0.0003;
     key.shadow.camera.left = -140;
     key.shadow.camera.right = 140;
@@ -95,14 +95,11 @@ function BallViewport({ ball, accentColor }, ref) {
     key.shadow.camera.near = 1;
     key.shadow.camera.far = 350;
     scene.add(key);
-    const rim = new DirectionalLight("#ffffff", 0.62);
-    rim.position.set(-80, 20, -55);
-    scene.add(rim);
-    const fill = new DirectionalLight("#ffffff", 0.52);
-    fill.position.set(15, -70, 80);
+    const fill = new DirectionalLight("#e5ebef", 0.36);
+    fill.position.set(-65, 35, 45);
     scene.add(fill);
-    const back = new DirectionalLight("#eef1f5", 0.48);
-    back.position.set(45, 20, -90);
+    const back = new DirectionalLight("#f4eee5", 0.2);
+    back.position.set(-25, 30, -85);
     scene.add(back);
 
     const grid = new GridHelper(220, 22, "#c2c8bd", "#dfe3dc");
