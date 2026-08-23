@@ -89,3 +89,20 @@ export const planRank = (plan: AccountPlan) =>
 
 export const formatPlanLimit = (limit: number | null) =>
   limit === null ? "Unlimited" : String(limit);
+
+export type PlanLimitKind = "exports" | "projects";
+
+export const planUsageLimit = (
+  plan: AccountPlan | null | undefined,
+  kind: PlanLimitKind,
+  isAdmin = false,
+): number | null => {
+  if (isAdmin) return null;
+
+  const definition = plan ? planById(plan) : null;
+  if (!definition) return 0;
+
+  return kind === "exports"
+    ? definition.exportLimit
+    : definition.projectLimit;
+};
